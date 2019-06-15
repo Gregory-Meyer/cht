@@ -1,0 +1,9 @@
+[package]
+name = "cht"
+version = "0.1.0"
+authors = ["Gregory Meyer <me@gregjm.dev>"]
+edition = "2018"
+
+[dependencies]
+crossbeam-epoch = "0.7"
+fxhash = "0.2"
