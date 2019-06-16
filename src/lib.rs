@@ -38,38 +38,34 @@ mod tests {
     };
 
     #[test]
-    fn hash_map_basics() {
-        let map = HashMap::with_capacity(8);
+    fn hash_map_insertion() {
+        const MAX_VALUE: i32 = 512;
 
-        assert_eq!(map.insert("foo".to_string(), 5), None);
-        assert_eq!(map.insert("bar".to_string(), 10), None);
-        assert_eq!(map.insert("baz".to_string(), 15), None);
-        assert_eq!(map.insert("qux".to_string(), 20), None);
+        let map = HashMap::with_capacity(MAX_VALUE as usize);
 
-        assert_eq!(map.get("foo"), Some(5));
-        assert_eq!(map.get("bar"), Some(10));
-        assert_eq!(map.get("baz"), Some(15));
-        assert_eq!(map.get("qux"), Some(20));
+        for i in 0..MAX_VALUE {
+            assert_eq!(map.insert(i, i), None);
 
-        assert_eq!(map.insert("qux".to_string(), 5), Some(20));
-        assert_eq!(map.insert("baz".to_string(), 10), Some(15));
-        assert_eq!(map.insert("bar".to_string(), 15), Some(10));
-        assert_eq!(map.insert("foo".to_string(), 20), Some(5));
+            for j in 0..i {
+                assert_eq!(map.get(&j), Some(j));
+                assert_eq!(map.insert(j, j), Some(j));
+            }
+        }
     }
 
     #[test]
     fn hash_map_growth() {
         const MAX_VALUE: i32 = 512;
 
-        let map = HashMap::new();
+        let map = HashMap::with_capacity(1);
 
         for i in 0..MAX_VALUE {
             assert_eq!(map.insert(i, i), None);
-        }
 
-        for i in 0..MAX_VALUE {
-            assert_eq!(map.get(&i), Some(i));
-            assert_eq!(map.insert(i, i), Some(i));
+            for j in 0..i {
+                assert_eq!(map.get(&j), Some(j));
+                assert_eq!(map.insert(j, j), Some(j));
+            }
         }
     }
 
@@ -114,7 +110,7 @@ mod tests {
         const NUM_THREADS: usize = 64;
         const MAX_INSERTED_VALUE: i32 = (NUM_THREADS as i32) * MAX_VALUE;
 
-        let map = Arc::new(HashMap::new());
+        let map = Arc::new(HashMap::with_capacity(1));
         let barrier = Arc::new(Barrier::new(NUM_THREADS));
 
         let threads: Vec<_> = (0..NUM_THREADS)
@@ -147,7 +143,7 @@ mod tests {
     fn hash_map_removal() {
         const MAX_VALUE: i32 = 512;
 
-        let map = HashMap::new();
+        let map = HashMap::with_capacity(1);
 
         for i in 0..MAX_VALUE {
             assert_eq!(map.insert(i, i), None);
@@ -168,7 +164,7 @@ mod tests {
         const NUM_THREADS: usize = 64;
         const MAX_INSERTED_VALUE: i32 = (NUM_THREADS as i32) * MAX_VALUE;
 
-        let map = Arc::new(HashMap::with_capacity(MAX_INSERTED_VALUE as usize));
+        let map = Arc::new(HashMap::with_capacity(1));
 
         for i in 0..MAX_INSERTED_VALUE {
             assert_eq!(map.insert(i, i), None);
@@ -198,6 +194,136 @@ mod tests {
         assert_eq!(map.len(), 0);
 
         for i in 0..MAX_INSERTED_VALUE {
+            assert_eq!(map.get(&i), None);
+        }
+    }
+
+    #[test]
+    fn hash_map_concurrent_insertion_and_removal() {
+        const MAX_VALUE: i32 = 512;
+        const NUM_THREADS: usize = 64;
+        const MAX_INSERTED_VALUE: i32 = (NUM_THREADS as i32) * MAX_VALUE * 2;
+        const INSERTED_MIDPOINT: i32 = MAX_INSERTED_VALUE / 2;
+
+        let map = Arc::new(HashMap::with_capacity(MAX_INSERTED_VALUE as usize));
+
+        for i in INSERTED_MIDPOINT..MAX_INSERTED_VALUE {
+            assert_eq!(map.insert(i, i), None);
+        }
+
+        let barrier = Arc::new(Barrier::new(NUM_THREADS * 2));
+
+        let insert_threads: Vec<_> = (0..NUM_THREADS)
+            .map(|i| {
+                let map = map.clone();
+                let barrier = barrier.clone();
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
+                        assert_eq!(map.insert(j, j), None);
+                    }
+                })
+            })
+            .collect();
+
+        let remove_threads: Vec<_> = (0..NUM_THREADS)
+            .map(|i| {
+                let map = map.clone();
+                let barrier = barrier.clone();
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    for j in (0..MAX_VALUE).map(|j| INSERTED_MIDPOINT + j + (i as i32 * MAX_VALUE))
+                    {
+                        assert_eq!(map.remove(&j), Some(j));
+                    }
+                })
+            })
+            .collect();
+
+        for result in insert_threads
+            .into_iter()
+            .chain(remove_threads.into_iter())
+            .map(|t| t.join())
+        {
+            assert!(result.is_ok());
+        }
+
+        assert_eq!(map.len(), INSERTED_MIDPOINT as usize);
+
+        for i in 0..INSERTED_MIDPOINT {
+            assert_eq!(map.get(&i), Some(i));
+        }
+
+        for i in INSERTED_MIDPOINT..MAX_INSERTED_VALUE {
+            assert_eq!(map.get(&i), None);
+        }
+    }
+
+    #[test]
+    fn hash_map_concurrent_growth_and_removal() {
+        const MAX_VALUE: i32 = 512;
+        const NUM_THREADS: usize = 64;
+        const MAX_INSERTED_VALUE: i32 = (NUM_THREADS as i32) * MAX_VALUE * 2;
+        const INSERTED_MIDPOINT: i32 = MAX_INSERTED_VALUE / 2;
+
+        let map = Arc::new(HashMap::with_capacity(1));
+
+        for i in INSERTED_MIDPOINT..MAX_INSERTED_VALUE {
+            assert_eq!(map.insert(i, i), None);
+        }
+
+        let barrier = Arc::new(Barrier::new(NUM_THREADS * 2));
+
+        let insert_threads: Vec<_> = (0..NUM_THREADS)
+            .map(|i| {
+                let map = map.clone();
+                let barrier = barrier.clone();
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
+                        assert_eq!(map.insert(j, j), None);
+                    }
+                })
+            })
+            .collect();
+
+        let remove_threads: Vec<_> = (0..NUM_THREADS)
+            .map(|i| {
+                let map = map.clone();
+                let barrier = barrier.clone();
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    for j in (0..MAX_VALUE).map(|j| INSERTED_MIDPOINT + j + (i as i32 * MAX_VALUE))
+                    {
+                        assert_eq!(map.remove(&j), Some(j));
+                    }
+                })
+            })
+            .collect();
+
+        for result in insert_threads
+            .into_iter()
+            .chain(remove_threads.into_iter())
+            .map(|t| t.join())
+        {
+            assert!(result.is_ok());
+        }
+
+        assert_eq!(map.len(), INSERTED_MIDPOINT as usize);
+
+        for i in 0..INSERTED_MIDPOINT {
+            assert_eq!(map.get(&i), Some(i));
+        }
+
+        for i in INSERTED_MIDPOINT..MAX_INSERTED_VALUE {
             assert_eq!(map.get(&i), None);
         }
     }
