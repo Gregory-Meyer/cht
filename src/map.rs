@@ -382,6 +382,7 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
         mut buckets_ptr: Shared<'g, BucketArray<K, V, S>>,
         guard: &'g Guard,
     ) {
+        // TODO: figure out if this needs to be less eager
         assert!(!buckets_ptr.is_null());
 
         let mut next_ptr = unsafe { buckets_ptr.deref() }
@@ -473,6 +474,7 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
                         let next_array_ptr = self.next_array.load(Ordering::SeqCst, guard);
                         assert!(!next_array_ptr.is_null());
                         let next_array = unsafe { next_array_ptr.deref() };
+                        self.grow_into(next_array, guard);
 
                         let (new_bucket, _) = next_array.get(key, hash, guard);
 
@@ -509,6 +511,25 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
             return ret;
         }
 
+        let insert_into_next = |have_seen_redirect| {
+            let next_array = if have_seen_redirect {
+                let next_array_ptr = self.next_array.load(Ordering::SeqCst, guard);
+                assert!(!next_array_ptr.is_null());
+
+                let next_array = unsafe { next_array_ptr.deref() };
+                self.grow_into(next_array, guard);
+
+                next_array
+            } else {
+                self.grow(guard)
+            };
+
+            let mut ret = next_array.insert(bucket_ptr, hash, guard);
+            ret.was_redirected = true;
+
+            return ret;
+        };
+
         let offset = (hash & (capacity - 1) as u64) as usize;
         let mut have_seen_redirect = false;
 
@@ -521,14 +542,7 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
 
                 if this_bucket_ptr.is_null() {
                     if this_bucket_ptr.tag() == REDIRECT_TAG {
-                        let next_array_ptr = self.next_array.load(Ordering::SeqCst, guard);
-                        assert!(!next_array_ptr.is_null());
-                        let next_array = unsafe { next_array_ptr.deref() };
-
-                        let mut ret = next_array.insert(bucket_ptr, hash, guard);
-                        ret.was_redirected = true;
-
-                        return ret;
+                        return insert_into_next(true);
                     }
 
                     match this_bucket.compare_and_set_weak(
@@ -552,14 +566,7 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
 
                     if this_bucket_ref.key == bucket.key {
                         if this_bucket_ptr.tag() == REDIRECT_TAG {
-                            let next_array_ptr = self.next_array.load(Ordering::SeqCst, guard);
-                            assert!(!next_array_ptr.is_null());
-                            let next_array = unsafe { next_array_ptr.deref() };
-
-                            let mut ret = next_array.insert(bucket_ptr, hash, guard);
-                            ret.was_redirected = true;
-
-                            return ret;
+                            return insert_into_next(true);
                         }
 
                         match this_bucket.compare_and_set_weak(
@@ -588,19 +595,7 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
             }
         }
 
-        let next_array = if have_seen_redirect {
-            let next_array_ptr = self.next_array.load(Ordering::SeqCst, guard);
-            assert!(!next_array_ptr.is_null());
-
-            unsafe { next_array_ptr.deref() }
-        } else {
-            self.grow(guard)
-        };
-
-        let mut ret = next_array.insert(bucket_ptr, hash, guard);
-        ret.was_redirected = true;
-
-        ret
+        insert_into_next(have_seen_redirect)
     }
 
     fn remove<Q: Hash + Eq + ?Sized>(
@@ -705,54 +700,59 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
     }
 
     fn grow_into(&self, next_array: &'g BucketArray<K, V, S>, guard: &'g Guard) {
-        'outer: for this_bucket in self.buckets.iter() {
+        for this_bucket in self.buckets.iter() {
             let mut this_bucket_ptr = this_bucket.load(Ordering::SeqCst, guard);
 
             loop {
-                // if the tag is redirect, someone else moved it already
                 if this_bucket_ptr.tag() == REDIRECT_TAG {
-                    continue 'outer;
+                    // another thread already relocated this bucket
+                    break;
                 }
 
                 if this_bucket_ptr.is_null() {
+                    // set redirect tag and move on
                     match this_bucket.compare_and_set_weak(
-                        this_bucket_ptr,
+                        Shared::null(),
                         Shared::null().with_tag(REDIRECT_TAG),
                         Ordering::SeqCst,
                         guard,
                     ) {
-                        Ok(_) => continue 'outer,
+                        Ok(_) => break,
                         Err(e) => this_bucket_ptr = e.current,
                     }
                 } else {
                     let this_bucket_ref = unsafe { this_bucket_ptr.deref() };
 
                     if this_bucket_ref.maybe_value.is_some() {
-                        let hash = self.get_hash(&this_bucket_ref.key);
+                        // insert into the next array
+                        let this_key = &this_bucket_ref.key;
+                        let hash = self.get_hash(this_key);
 
                         next_array.insert(this_bucket_ptr, hash, guard);
 
+                        // strong CAS to avoid spuriously inserting/removing
                         match this_bucket.compare_and_set(
                             this_bucket_ptr,
                             this_bucket_ptr.with_tag(REDIRECT_TAG),
                             Ordering::SeqCst,
                             guard,
                         ) {
-                            Ok(_) => continue 'outer,
+                            Ok(_) => break,
                             Err(e) => {
-                                next_array.remove(&this_bucket_ref.key, hash, None, guard);
+                                // don't remove??? dunno what's going on here
+                                // next_array.remove(this_key, hash, None, guard);
                                 this_bucket_ptr = e.current;
                             }
                         }
                     } else {
-                        // mark tombstones as redirect, but don't move them
+                        // tombstone; set redirect tag and move on
                         match this_bucket.compare_and_set_weak(
                             this_bucket_ptr,
                             this_bucket_ptr.with_tag(REDIRECT_TAG),
                             Ordering::SeqCst,
                             guard,
                         ) {
-                            Ok(_) => continue 'outer,
+                            Ok(_) => break,
                             Err(e) => this_bucket_ptr = e.current,
                         }
                     }
