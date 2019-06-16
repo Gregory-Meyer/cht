@@ -57,6 +57,11 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
     }
 
     pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> HashMap<K, V, S> {
+        assert!(
+            mem::align_of::<Bucket<K, V>>() >= 2,
+            "Buckets must be aligned to 2-byte boundaries or more"
+        );
+
         if capacity == 0 {
             HashMap {
                 buckets: Atomic::null(),
@@ -176,60 +181,34 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
 
     pub fn insert(&self, k: K, v: V) -> Option<V> {
         let guard = &crossbeam_epoch::pin();
-        let previous_bucket_ptr = self.do_insert(k, v, guard);
 
-        if previous_bucket_ptr.is_null() {
-            None
-        } else {
-            let previous_bucket_ref = unsafe { previous_bucket_ptr.deref() };
-
-            previous_bucket_ref.maybe_value.as_ref().cloned()
-        }
+        self.do_insert(k, v, guard)
+            .and_then(|bucket| bucket.maybe_value.as_ref().cloned())
     }
 
     pub fn insert_entry(&self, k: K, v: V) -> Option<(K, V)> {
         let guard = &crossbeam_epoch::pin();
-        let previous_bucket_ptr = self.do_insert(k, v, guard);
 
-        if previous_bucket_ptr.is_null() {
-            None
-        } else {
-            let previous_bucket_ref = unsafe { previous_bucket_ptr.deref() };
-
-            previous_bucket_ref
+        self.do_insert(k, v, guard).and_then(|bucket| {
+            bucket
                 .maybe_value
                 .as_ref()
-                .map(|v| (previous_bucket_ref.key.clone(), v.clone()))
-        }
+                .map(|v| (bucket.key.clone(), v.clone()))
+        })
     }
 
     pub fn insert_and<F: FnOnce(&V) -> T, T>(&self, k: K, v: V, func: F) -> Option<T> {
         let guard = &crossbeam_epoch::pin();
-        let previous_bucket_ptr = self.do_insert(k, v, guard);
 
-        if previous_bucket_ptr.is_null() {
-            None
-        } else {
-            let previous_bucket_ref = unsafe { previous_bucket_ptr.deref() };
-
-            previous_bucket_ref.maybe_value.as_ref().map(|v| func(&v))
-        }
+        self.do_insert(k, v, guard)
+            .and_then(|bucket| bucket.maybe_value.as_ref().map(func))
     }
 
     pub fn insert_entry_and<F: FnOnce(&K, &V) -> T, T>(&self, k: K, v: V, func: F) -> Option<T> {
         let guard = &crossbeam_epoch::pin();
-        let previous_bucket_ptr = self.do_insert(k, v, guard);
 
-        if previous_bucket_ptr.is_null() {
-            None
-        } else {
-            let previous_bucket_ref = unsafe { previous_bucket_ptr.deref() };
-
-            previous_bucket_ref
-                .maybe_value
-                .as_ref()
-                .map(|v| func(&previous_bucket_ref.key, &v))
-        }
+        self.do_insert(k, v, guard)
+            .and_then(|bucket| bucket.maybe_value.as_ref().map(|v| func(&bucket.key, v)))
     }
 
     pub fn remove<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<V>
@@ -238,24 +217,50 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
     {
         let guard = &crossbeam_epoch::pin();
 
-        let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
+        self.do_remove(key, guard)
+            .and_then(|bucket| bucket.maybe_value.as_ref().cloned())
+    }
 
-        if buckets_ptr.is_null() {
-            return None;
-        }
+    pub fn remove_entry<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+    {
+        let guard = &crossbeam_epoch::pin();
 
-        let buckets_ref = unsafe { buckets_ptr.deref() };
-        let hash = self.get_hash(key);
+        self.do_remove(key, guard).and_then(|bucket| {
+            bucket
+                .maybe_value
+                .as_ref()
+                .map(|v| (bucket.key.clone(), v.clone()))
+        })
+    }
 
-        let removed_bucket_ptr = buckets_ref.remove(key, hash, None, guard);
+    pub fn remove_and<Q: Hash + Eq + ?Sized, F: FnOnce(&V) -> T, T>(
+        &self,
+        key: &Q,
+        func: F,
+    ) -> Option<T>
+    where
+        K: Borrow<Q>,
+    {
+        let guard = &crossbeam_epoch::pin();
 
-        if removed_bucket_ptr.is_null() {
-            None
-        } else {
-            let removed_bucket_ref = unsafe { removed_bucket_ptr.deref() };
+        self.do_remove(key, guard)
+            .and_then(|bucket| bucket.maybe_value.as_ref().map(func))
+    }
 
-            removed_bucket_ref.maybe_value.as_ref().cloned()
-        }
+    pub fn remove_entry_and<Q: Hash + Eq + ?Sized, F: FnOnce(&K, &V) -> T, T>(
+        &self,
+        key: &Q,
+        func: F,
+    ) -> Option<T>
+    where
+        K: Borrow<Q>,
+    {
+        let guard = &crossbeam_epoch::pin();
+
+        self.do_remove(key, guard)
+            .and_then(|bucket| bucket.maybe_value.as_ref().map(|v| func(&bucket.key, v)))
     }
 }
 
@@ -283,14 +288,10 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
             self.catch_up_buckets_ptr(buckets_ptr, guard);
         }
 
-        if found_bucket_ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { found_bucket_ptr.deref() })
-        }
+        unsafe { found_bucket_ptr.as_ref() }
     }
 
-    fn do_insert(&self, key: K, value: V, guard: &'g Guard) -> Shared<'g, Bucket<K, V>> {
+    fn do_insert(&self, key: K, value: V, guard: &'g Guard) -> Option<&'g Bucket<K, V>> {
         let hash = self.get_hash(&key);
 
         let buckets_ptr = self.get_or_create_buckets(guard);
@@ -312,7 +313,27 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
             self.catch_up_buckets_ptr(buckets_ptr, guard);
         }
 
-        previous_bucket_ptr
+        unsafe { previous_bucket_ptr.as_ref() }
+    }
+
+    fn do_remove<Q: Hash + Eq + ?Sized>(
+        &self,
+        key: &Q,
+        guard: &'g Guard,
+    ) -> Option<&'g Bucket<K, V>>
+    where
+        K: Borrow<Q>,
+    {
+        let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
+
+        if buckets_ptr.is_null() {
+            return None;
+        }
+
+        let buckets_ref = unsafe { buckets_ptr.deref() };
+        let hash = self.get_hash(key);
+
+        unsafe { buckets_ref.remove(key, hash, None, guard).as_ref() }
     }
 
     fn get_hash<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> u64 {
