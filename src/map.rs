@@ -26,7 +26,10 @@ use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash, Hasher},
     mem,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use crossbeam_epoch::{self, Atomic, Guard, Owned, Shared};
@@ -34,8 +37,8 @@ use fxhash::FxBuildHasher;
 
 #[derive(Default)]
 pub struct HashMap<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> {
-    buckets: Atomic<BucketArray<K, V>>,
-    hash_builder: S,
+    buckets: Atomic<BucketArray<K, V, S>>,
+    hash_builder: Arc<S>,
 }
 
 impl<K: Hash + Eq + Clone, V: Clone> HashMap<K, V, FxBuildHasher> {
@@ -57,14 +60,58 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
         if capacity == 0 {
             HashMap {
                 buckets: Atomic::null(),
-                hash_builder,
+                hash_builder: Arc::new(hash_builder),
             }
         } else {
+            let hash_builder = Arc::new(hash_builder);
+
             HashMap {
-                buckets: Atomic::new(BucketArray::with_capacity(capacity)),
+                buckets: Atomic::new(BucketArray::with_capacity_and_hasher(
+                    capacity,
+                    hash_builder.clone(),
+                )),
                 hash_builder,
             }
         }
+    }
+
+    pub fn len(&self) -> usize {
+        let guard = &crossbeam_epoch::pin();
+        let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
+
+        if buckets_ptr.is_null() {
+            return 0;
+        }
+
+        let buckets_ref = unsafe { buckets_ptr.deref() };
+
+        buckets_ref.len.load(Ordering::SeqCst)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let guard = &crossbeam_epoch::pin();
+        let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
+
+        if buckets_ptr.is_null() {
+            return true;
+        }
+
+        let buckets_ref = unsafe { buckets_ptr.deref() };
+
+        buckets_ref.len.load(Ordering::SeqCst) == 0
+    }
+
+    pub fn capacity(&self) -> usize {
+        let guard = &crossbeam_epoch::pin();
+        let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
+
+        if buckets_ptr.is_null() {
+            return 0;
+        }
+
+        let buckets_ref = unsafe { buckets_ptr.deref() };
+
+        buckets_ref.buckets.len() / 2
     }
 
     pub fn get<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> Option<V>
@@ -127,35 +174,87 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
             })
     }
 
-    pub fn insert(&self, k: K, v: V) -> Option<(K, V)> {
+    pub fn insert(&self, k: K, v: V) -> Option<V> {
         let guard = &crossbeam_epoch::pin();
-
-        let hash = self.get_hash(&k);
-
-        let buckets_ptr = self.get_or_create_buckets(guard);
-        assert!(!buckets_ptr.is_null());
-        let buckets = unsafe { buckets_ptr.deref() };
-
-        let new_bucket = Owned::new(Bucket {
-            key: k,
-            maybe_value: Some(v),
-        })
-        .into_shared(guard);
-        let (previous_bucket_ptr, _, redirected) = buckets.insert(new_bucket, hash, guard);
-
-        if redirected {
-            self.catch_up_buckets_ptr(buckets_ptr, guard);
-        }
+        let previous_bucket_ptr = self.do_insert(k, v, guard);
 
         if previous_bucket_ptr.is_null() {
             None
         } else {
-            let previous_bucket = unsafe { previous_bucket_ptr.deref() };
+            let previous_bucket_ref = unsafe { previous_bucket_ptr.deref() };
 
-            match &previous_bucket.maybe_value {
-                Some(v) => Some((previous_bucket.key.clone(), v.clone())),
-                None => None,
-            }
+            previous_bucket_ref.maybe_value.as_ref().cloned()
+        }
+    }
+
+    pub fn insert_entry(&self, k: K, v: V) -> Option<(K, V)> {
+        let guard = &crossbeam_epoch::pin();
+        let previous_bucket_ptr = self.do_insert(k, v, guard);
+
+        if previous_bucket_ptr.is_null() {
+            None
+        } else {
+            let previous_bucket_ref = unsafe { previous_bucket_ptr.deref() };
+
+            previous_bucket_ref
+                .maybe_value
+                .as_ref()
+                .map(|v| (previous_bucket_ref.key.clone(), v.clone()))
+        }
+    }
+
+    pub fn insert_and<F: FnOnce(&V) -> T, T>(&self, k: K, v: V, func: F) -> Option<T> {
+        let guard = &crossbeam_epoch::pin();
+        let previous_bucket_ptr = self.do_insert(k, v, guard);
+
+        if previous_bucket_ptr.is_null() {
+            None
+        } else {
+            let previous_bucket_ref = unsafe { previous_bucket_ptr.deref() };
+
+            previous_bucket_ref.maybe_value.as_ref().map(|v| func(&v))
+        }
+    }
+
+    pub fn insert_entry_and<F: FnOnce(&K, &V) -> T, T>(&self, k: K, v: V, func: F) -> Option<T> {
+        let guard = &crossbeam_epoch::pin();
+        let previous_bucket_ptr = self.do_insert(k, v, guard);
+
+        if previous_bucket_ptr.is_null() {
+            None
+        } else {
+            let previous_bucket_ref = unsafe { previous_bucket_ptr.deref() };
+
+            previous_bucket_ref
+                .maybe_value
+                .as_ref()
+                .map(|v| func(&previous_bucket_ref.key, &v))
+        }
+    }
+
+    pub fn remove<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+    {
+        let guard = &crossbeam_epoch::pin();
+
+        let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
+
+        if buckets_ptr.is_null() {
+            return None;
+        }
+
+        let buckets_ref = unsafe { buckets_ptr.deref() };
+        let hash = self.get_hash(key);
+
+        let removed_bucket_ptr = buckets_ref.remove(key, hash, None, guard);
+
+        if removed_bucket_ptr.is_null() {
+            None
+        } else {
+            let removed_bucket_ref = unsafe { removed_bucket_ptr.deref() };
+
+            removed_bucket_ref.maybe_value.as_ref().cloned()
         }
     }
 }
@@ -191,13 +290,39 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
         }
     }
 
+    fn do_insert(&self, key: K, value: V, guard: &'g Guard) -> Shared<'g, Bucket<K, V>> {
+        let hash = self.get_hash(&key);
+
+        let buckets_ptr = self.get_or_create_buckets(guard);
+        assert!(!buckets_ptr.is_null());
+        let buckets = unsafe { buckets_ptr.deref() };
+
+        let new_bucket = Owned::new(Bucket {
+            key,
+            maybe_value: Some(value),
+        })
+        .into_shared(guard);
+
+        let InsertReturn {
+            previous_bucket_ptr,
+            was_redirected,
+        } = buckets.insert(new_bucket, hash, guard);
+
+        if was_redirected {
+            self.catch_up_buckets_ptr(buckets_ptr, guard);
+        }
+
+        previous_bucket_ptr
+    }
+
     fn get_hash<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> u64 {
         let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
+
         hasher.finish()
     }
 
-    fn get_or_create_buckets(&self, guard: &'g Guard) -> Shared<'g, BucketArray<K, V>> {
+    fn get_or_create_buckets(&self, guard: &'g Guard) -> Shared<'g, BucketArray<K, V, S>> {
         const DEFAULT_CAPACITY: usize = 64;
 
         let mut buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
@@ -207,7 +332,10 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
             if buckets_ptr.is_null() {
                 let new_buckets = match maybe_new_buckets.take() {
                     Some(b) => b,
-                    None => Owned::new(BucketArray::with_capacity(DEFAULT_CAPACITY)),
+                    None => Owned::new(BucketArray::with_capacity_and_hasher(
+                        DEFAULT_CAPACITY,
+                        self.hash_builder.clone(),
+                    )),
                 };
 
                 match self.buckets.compare_and_set_weak(
@@ -230,7 +358,7 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
 
     fn catch_up_buckets_ptr(
         &self,
-        mut buckets_ptr: Shared<'g, BucketArray<K, V>>,
+        mut buckets_ptr: Shared<'g, BucketArray<K, V, S>>,
         guard: &'g Guard,
     ) {
         assert!(!buckets_ptr.is_null());
@@ -251,6 +379,12 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
             {
                 Ok(_) => {
                     buckets_ptr = next_ptr;
+
+                    if !buckets_ptr.is_null() {
+                        next_ptr = unsafe { buckets_ptr.deref() }
+                            .next_array
+                            .load(Ordering::SeqCst, guard);
+                    }
                 }
                 Err(e) => {
                     buckets_ptr = e.current;
@@ -264,25 +398,34 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
     }
 }
 
-struct BucketArray<K: Hash + Eq + Clone, V: Clone> {
+struct BucketArray<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> {
     buckets: Vec<Atomic<Bucket<K, V>>>, // must be a power of 2
     len: AtomicUsize,
-    next_array: Atomic<BucketArray<K, V>>,
+    next_array: Atomic<BucketArray<K, V, S>>,
+    hash_builder: Arc<S>,
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
-    fn with_capacity(capacity: usize) -> BucketArray<K, V> {
+impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
+    fn with_capacity_and_hasher(capacity: usize, hash_builder: Arc<S>) -> BucketArray<K, V, S> {
         BucketArray {
-            buckets: vec![Atomic::null(); round_up_to_next_power_of_2(capacity)],
+            buckets: vec![Atomic::null(); round_up_to_next_power_of_2(capacity * 2)],
             len: AtomicUsize::new(0),
             next_array: Atomic::null(),
+            hash_builder,
         }
+    }
+
+    fn get_hash(&self, key: &K) -> u64 {
+        let mut hasher = self.hash_builder.build_hasher();
+        key.hash(&mut hasher);
+
+        hasher.finish()
     }
 }
 
 const REDIRECT_TAG: usize = 1;
 
-impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
+impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
     fn get<Q: ?Sized + Hash + Eq>(
         &self,
         key: &Q,
@@ -328,7 +471,7 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
         bucket_ptr: Shared<'g, Bucket<K, V>>,
         hash: u64,
         guard: &'g Guard,
-    ) -> (Shared<'g, Bucket<K, V>>, *const Atomic<Bucket<K, V>>, bool) {
+    ) -> InsertReturn<'g, K, V> {
         assert!(!bucket_ptr.is_null());
 
         let bucket = unsafe { bucket_ptr.deref() };
@@ -336,13 +479,13 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
         let num_elements = self.len.load(Ordering::SeqCst);
 
         // grow if inserting would push us over a load factor of 0.5
-        if 2 * (num_elements + 1) > capacity {
+        if (num_elements + 1) > (capacity / 2) {
             let next_array = self.grow(guard);
 
-            let (previous_bucket_ptr, inserted_bucket_ptr, _) =
-                next_array.insert(bucket_ptr, hash, guard);
+            let mut ret = next_array.insert(bucket_ptr, hash, guard);
+            ret.was_redirected = true;
 
-            return (previous_bucket_ptr, inserted_bucket_ptr, true);
+            return ret;
         }
 
         let offset = (hash & (capacity - 1) as u64) as usize;
@@ -361,10 +504,10 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
                         assert!(!next_array_ptr.is_null());
                         let next_array = unsafe { next_array_ptr.deref() };
 
-                        let (previous_bucket_ptr, inserted_bucket_ptr, _) =
-                            next_array.insert(bucket_ptr, hash, guard);
+                        let mut ret = next_array.insert(bucket_ptr, hash, guard);
+                        ret.was_redirected = true;
 
-                        return (previous_bucket_ptr, inserted_bucket_ptr, true);
+                        return ret;
                     }
 
                     match this_bucket.compare_and_set_weak(
@@ -376,7 +519,10 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
                         Ok(_) => {
                             self.len.fetch_add(1, Ordering::SeqCst);
 
-                            return (this_bucket_ptr, this_bucket, false);
+                            return InsertReturn {
+                                previous_bucket_ptr: this_bucket_ptr,
+                                was_redirected: false,
+                            };
                         }
                         Err(e) => this_bucket_ptr = e.current,
                     };
@@ -389,10 +535,10 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
                             assert!(!next_array_ptr.is_null());
                             let next_array = unsafe { next_array_ptr.deref() };
 
-                            let (previous_bucket_ptr, inserted_bucket_ptr, _) =
-                                next_array.insert(bucket_ptr, hash, guard);
+                            let mut ret = next_array.insert(bucket_ptr, hash, guard);
+                            ret.was_redirected = true;
 
-                            return (previous_bucket_ptr, inserted_bucket_ptr, true);
+                            return ret;
                         }
 
                         match this_bucket.compare_and_set_weak(
@@ -402,9 +548,15 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
                             guard,
                         ) {
                             Ok(_) => {
-                                self.len.fetch_add(1, Ordering::SeqCst);
+                                // this was a swap
+                                if this_bucket_ref.maybe_value.is_none() {
+                                    self.len.fetch_add(1, Ordering::SeqCst);
+                                }
 
-                                return (this_bucket_ptr, this_bucket, false);
+                                return InsertReturn {
+                                    previous_bucket_ptr: this_bucket_ptr,
+                                    was_redirected: false,
+                                };
                             }
                             Err(e) => this_bucket_ptr = e.current,
                         }
@@ -424,23 +576,94 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
             self.grow(guard)
         };
 
-        let (previous_bucket_ptr, inserted_bucket_ptr, _) =
-            next_array.insert(bucket_ptr, hash, guard);
+        let mut ret = next_array.insert(bucket_ptr, hash, guard);
+        ret.was_redirected = true;
 
-        (previous_bucket_ptr, inserted_bucket_ptr, true)
+        ret
     }
 
-    fn grow<F: Fn(&K) -> u64>(&self, hash_fn: F, guard: &'g Guard) -> &'g BucketArray<K, V> {
+    fn remove<Q: Hash + Eq + ?Sized>(
+        &self,
+        key: &Q,
+        hash: u64,
+        mut maybe_new_bucket: Option<Owned<Bucket<K, V>>>,
+        guard: &'g Guard,
+    ) -> Shared<'g, Bucket<K, V>>
+    where
+        K: Borrow<Q>,
+    {
+        let capacity = self.buckets.len();
+        let offset = (hash & (capacity - 1) as u64) as usize;
+
+        'outer: for i in (0..self.buckets.len()).map(|x| (x + offset) & (capacity - 1)) {
+            let this_bucket = &self.buckets[i];
+            let mut this_bucket_ptr = this_bucket.load(Ordering::SeqCst, guard);
+
+            loop {
+                if this_bucket_ptr.is_null() {
+                    return Shared::null();
+                }
+
+                let this_bucket_ref = unsafe { this_bucket_ptr.deref() };
+
+                if this_bucket_ref.key.borrow() != key {
+                    continue 'outer;
+                }
+
+                let new_bucket = match maybe_new_bucket.take() {
+                    Some(b) => b,
+                    None => Owned::new(Bucket {
+                        key: this_bucket_ref.key.clone(),
+                        maybe_value: None,
+                    }),
+                };
+
+                if this_bucket_ptr.tag() == REDIRECT_TAG {
+                    let next_array_ptr = self.next_array.load(Ordering::SeqCst, guard);
+                    assert!(!next_array_ptr.is_null());
+                    let next_array = unsafe { next_array_ptr.deref() };
+
+                    return next_array.remove(key, hash, Some(new_bucket), guard);
+                }
+
+                match this_bucket.compare_and_set_weak(
+                    this_bucket_ptr,
+                    new_bucket,
+                    Ordering::SeqCst,
+                    guard,
+                ) {
+                    Ok(_) => {
+                        let prev_value = self.len.fetch_sub(1, Ordering::SeqCst);
+                        let new_size = prev_value - 1;
+                        assert!(new_size < prev_value);
+
+                        return this_bucket_ptr;
+                    }
+                    Err(e) => {
+                        this_bucket_ptr = e.current;
+                        maybe_new_bucket.replace(e.new);
+                    }
+                }
+            }
+        }
+
+        Shared::null()
+    }
+
+    fn grow(&self, guard: &'g Guard) -> &'g BucketArray<K, V, S> {
         let maybe_next_array_ptr = self.next_array.load(Ordering::SeqCst, guard);
 
         if !maybe_next_array_ptr.is_null() {
             let next_array = unsafe { maybe_next_array_ptr.deref() };
-            self.grow_into(next_array, hash_fn, guard);
+            self.grow_into(next_array, guard);
 
             return next_array;
         }
 
-        let owned_new_array_ptr = Owned::new(BucketArray::with_capacity(self.buckets.len() * 2));
+        let owned_new_array_ptr = Owned::new(BucketArray::with_capacity_and_hasher(
+            self.buckets.len() * 2,
+            self.hash_builder.clone(),
+        ));
 
         let new_array_ptr = match self.next_array.compare_and_set(
             maybe_next_array_ptr,
@@ -455,17 +678,12 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
         assert!(!new_array_ptr.is_null());
         let new_array = unsafe { new_array_ptr.deref() };
 
-        self.grow_into(new_array, hash_fn, guard);
+        self.grow_into(new_array, guard);
 
         new_array
     }
 
-    fn grow_into<F: Fn(&K) -> u64>(
-        &self,
-        next_array: &'g BucketArray<K, V>,
-        hash_fn: F,
-        guard: &'g Guard,
-    ) {
+    fn grow_into(&self, next_array: &'g BucketArray<K, V, S>, guard: &'g Guard) {
         'outer: for this_bucket in self.buckets.iter() {
             let mut this_bucket_ptr = this_bucket.load(Ordering::SeqCst, guard);
 
@@ -489,11 +707,9 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
                     let this_bucket_ref = unsafe { this_bucket_ptr.deref() };
 
                     if this_bucket_ref.maybe_value.is_some() {
-                        let hash = hash_fn(&this_bucket_ref.key);
+                        let hash = self.get_hash(&this_bucket_ref.key);
 
-                        let (_, inserted_bucket_ptr, _) =
-                            next_array.insert(this_bucket_ptr, hash, guard);
-                        assert!(!inserted_bucket_ptr.is_null());
+                        next_array.insert(this_bucket_ptr, hash, guard);
 
                         match this_bucket.compare_and_set(
                             this_bucket_ptr,
@@ -503,15 +719,7 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
                         ) {
                             Ok(_) => continue 'outer,
                             Err(e) => {
-                                unsafe {
-                                    (*inserted_bucket_ptr).compare_and_set(
-                                        this_bucket_ptr,
-                                        Shared::null(),
-                                        Ordering::SeqCst,
-                                        guard,
-                                    )
-                                };
-
+                                next_array.remove(&this_bucket_ref.key, hash, None, guard);
                                 this_bucket_ptr = e.current;
                             }
                         }
@@ -533,7 +741,11 @@ impl<'g, K: Hash + Eq + Clone, V: Clone> BucketArray<K, V> {
     }
 }
 
-#[derive(Clone)]
+struct InsertReturn<'g, K: Hash + Eq + Clone, V: Clone> {
+    previous_bucket_ptr: Shared<'g, Bucket<K, V>>,
+    was_redirected: bool,
+}
+
 struct Bucket<K: Hash + Eq + Clone, V: Clone> {
     key: K,
     maybe_value: Option<V>,
