@@ -726,11 +726,6 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
     }
 }
 
-struct InsertReturn<'g, K: Hash + Eq + Clone, V: Clone> {
-    previous_bucket_ptr: Shared<'g, Bucket<K, V>>,
-    was_redirected: bool,
-}
-
 #[repr(align(2))]
 struct Bucket<K: Hash + Eq + Clone, V: Clone> {
     key: K,
