@@ -7,3 +7,17 @@ edition = "2018"
 [dependencies]
 crossbeam-epoch = "0.7"
 fxhash = "0.2"
+
+[dev-dependencies]
+criterion = "0.2"
+hashbrown = "0.5"
+lock_api = "0.2"
+parking_lot = "0.8"
+
+[[bench]]
+name = "cht"
+harness = false
+
+[[bench]]
+name = "mutex"
+harness = false
