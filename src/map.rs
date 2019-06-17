@@ -36,13 +36,13 @@ use crossbeam_epoch::{self, Atomic, Guard, Owned, Shared};
 use fxhash::FxBuildHasher;
 
 #[derive(Default)]
-pub struct HashMap<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> {
+pub struct HashMap<K: Hash + Eq, V, S: BuildHasher> {
     buckets: Atomic<BucketArray<K, V, S>>,
     len: AtomicUsize,
     hash_builder: Arc<S>,
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> HashMap<K, V, FxBuildHasher> {
+impl<K: Hash + Eq, V> HashMap<K, V, FxBuildHasher> {
     pub fn new() -> HashMap<K, V, FxBuildHasher> {
         HashMap::with_capacity_and_hasher(0, FxBuildHasher::default())
     }
@@ -52,7 +52,7 @@ impl<K: Hash + Eq + Clone, V: Clone> HashMap<K, V, FxBuildHasher> {
     }
 }
 
-impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
+impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     pub fn with_hasher(hash_builder: S) -> HashMap<K, V, S> {
         HashMap::with_capacity_and_hasher(0, hash_builder)
     }
@@ -102,6 +102,7 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
     pub fn get<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
+        V: Clone,
     {
         let guard = &crossbeam_epoch::pin();
 
@@ -114,7 +115,8 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
 
     pub fn get_key_value<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> Option<(K, V)>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Clone,
+        V: Clone,
     {
         let guard = &crossbeam_epoch::pin();
 
@@ -159,14 +161,21 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
             })
     }
 
-    pub fn insert(&self, k: K, v: V) -> Option<V> {
+    pub fn insert(&self, k: K, v: V) -> Option<V>
+    where
+        V: Clone,
+    {
         let guard = &crossbeam_epoch::pin();
 
         self.do_insert(k, v, guard)
             .and_then(|bucket| bucket.maybe_value.as_ref().cloned())
     }
 
-    pub fn insert_entry(&self, k: K, v: V) -> Option<(K, V)> {
+    pub fn insert_entry(&self, k: K, v: V) -> Option<(K, V)>
+    where
+        K: Clone,
+        V: Clone,
+    {
         let guard = &crossbeam_epoch::pin();
 
         self.do_insert(k, v, guard).and_then(|bucket| {
@@ -190,10 +199,13 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
         self.do_insert(k, v, guard)
             .and_then(|bucket| bucket.maybe_value.as_ref().map(|v| func(&bucket.key, v)))
     }
+}
 
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
     pub fn remove<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
+        V: Clone,
     {
         let guard = &crossbeam_epoch::pin();
 
@@ -204,6 +216,7 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
     pub fn remove_entry<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q>,
+        V: Clone,
     {
         let guard = &crossbeam_epoch::pin();
 
@@ -244,7 +257,7 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> HashMap<K, V, S> {
     }
 }
 
-impl<'g, K: Hash + Eq + Clone, V: Clone, S: 'g + BuildHasher> HashMap<K, V, S> {
+impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
     fn get_bucket<Q: ?Sized + Hash + Eq>(
         &self,
         key: &Q,
@@ -317,7 +330,7 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: 'g + BuildHasher> HashMap<K, V, S> {
         guard: &'g Guard,
     ) -> Option<&'g Bucket<K, V>>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Clone,
     {
         let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
 
@@ -377,14 +390,14 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: 'g + BuildHasher> HashMap<K, V, S> {
     }
 }
 
-struct BucketArray<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> {
+struct BucketArray<K: Hash + Eq, V, S: BuildHasher> {
     buckets: Vec<Atomic<Bucket<K, V>>>, // len() is a power of 2
     len: AtomicUsize,
     next_array: Atomic<BucketArray<K, V, S>>,
     hash_builder: Arc<S>,
 }
 
-impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
+impl<K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
     fn with_capacity_and_hasher(capacity: usize, hash_builder: Arc<S>) -> BucketArray<K, V, S> {
         BucketArray {
             buckets: vec![Atomic::null(); round_up_to_next_power_of_2(capacity * 2)],
@@ -404,7 +417,7 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
 
 const REDIRECT_TAG: usize = 1;
 
-impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
+impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
     fn get<Q: ?Sized + Hash + Eq>(
         &self,
         key: &Q,
@@ -546,7 +559,7 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
         guard: &'g Guard,
     ) -> Shared<'g, Bucket<K, V>>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Clone,
     {
         let capacity = self.buckets.len();
         let offset = (hash & (capacity - 1) as u64) as usize;
@@ -708,12 +721,12 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketArray<K, V, S> {
 }
 
 #[derive(Copy, Clone)]
-struct BucketAndParentPtr<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> {
+struct BucketAndParentPtr<'g, K: Hash + Eq, V, S: BuildHasher> {
     bucket_ptr: Shared<'g, Bucket<K, V>>,
     parent_ptr: Shared<'g, BucketArray<K, V, S>>,
 }
 
-impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketAndParentPtr<'g, K, V, S> {
+impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketAndParentPtr<'g, K, V, S> {
     fn without_parent(bucket_ptr: Shared<'g, Bucket<K, V>>) -> BucketAndParentPtr<'g, K, V, S> {
         BucketAndParentPtr {
             bucket_ptr,
@@ -741,12 +754,12 @@ impl<'g, K: Hash + Eq + Clone, V: Clone, S: BuildHasher> BucketAndParentPtr<'g, 
 }
 
 #[repr(align(2))]
-struct Bucket<K: Hash + Eq + Clone, V: Clone> {
+struct Bucket<K: Hash + Eq, V> {
     key: K,
     maybe_value: Option<V>,
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> Bucket<K, V> {
+impl<K: Hash + Eq, V> Bucket<K, V> {
     fn is_tombstone(&self) -> bool {
         self.maybe_value.is_none()
     }
