@@ -1,5 +1,9 @@
 # cht
 
+[![crates.io](https://img.shields.io/crates/v/cht.svg)](https://crates.io/crates/cht)
+[![docs.rs](https://docs.rs/cht/badge.svg)](https://docs.rs/cht)
+[![Travis CI](https://travis-ci.com/Gregory-Meyer/cht.svg?branch=master)](https://travis-ci.com/Gregory-Meyer/cht)
+
 cht provides a lockfree hash table that supports concurrent lookups, insertions,
 and deletions.
 
