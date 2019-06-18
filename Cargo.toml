@@ -3,6 +3,10 @@ name = "cht"
 version = "0.1.0"
 authors = ["Gregory Meyer <me@gregjm.dev>"]
 edition = "2018"
+description = "Lockfree resizeable concurrent hash table."
+repository = "https://github.com/Gregory-Meyer/cht"
+readme = "README.md"
+license = "MIT"
 
 [dependencies]
 crossbeam-epoch = "0.7"
