@@ -22,6 +22,9 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+//! A lockfree concurrent hash map implemented with open addressing and linear
+//! probing.
+
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash, Hasher},
