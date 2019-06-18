@@ -13,7 +13,7 @@ cht = "0.1"
 
 Then in your code:
 
-```rs
+```rust
 use cht::HashMap;
 
 use std::{sync::Arc, thread};
