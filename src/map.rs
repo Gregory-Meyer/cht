@@ -69,13 +69,13 @@ use fxhash::FxBuildHasher;
 /// [Junction]: https://github.com/preshing/junction
 /// [this blog post]: https://preshing.com/20160222/a-resizable-concurrent-map/
 #[derive(Default)]
-pub struct HashMap<K: Hash + Eq, V, S: BuildHasher> {
+pub struct HashMap<K: Hash + Eq, V, S: BuildHasher = FxBuildHasher> {
     buckets: Atomic<BucketArray<K, V, S>>,
     len: AtomicUsize,
     hash_builder: Arc<S>,
 }
 
-impl<K: Hash + Eq, V> HashMap<K, V, FxBuildHasher> {
+impl<K: Hash + Eq, V> HashMap<K, V> {
     /// Creates an empty `HashMap`.
     ///
     /// The hash map is created with a capacity of 0 and will not allocate any
