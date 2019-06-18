@@ -35,6 +35,36 @@ use std::{
 use crossbeam_epoch::{self, Atomic, Guard, Owned, Shared};
 use fxhash::FxBuildHasher;
 
+/// A lockfree concurrent hash map implemented with open addressing and linear
+/// probing.
+///
+/// The default hashing algorithm is [Fx Hash], a generally fast insecure
+/// hashing algorithm. If your application requires resistance to denial of
+/// service attacks such as HashDoS, consider using [`RandomState`] instead.
+///
+/// The hashing algorithm to be used can be chosen on a per-`HashMap` basis
+/// using the [`with_hasher`] and [`with_capacity_and_hasher`] methods.
+///
+/// Key types must implement [`Hash`] and [`Eq`]. Additionally, if you are going
+/// to be removing elements from this `HashMap`, the key type must also
+/// implement [`Clone`], as `HashMap` uses tombstones for deletion. Any
+/// operations that return a value require the value type to implement
+/// [`Clone`], as elements may be in use by other threads and as such cannot be
+/// moved from.
+///
+/// `HashMap` is inspired by Jeff Phreshing's hash tables implemented in
+/// [Junction], described in [this blog post]. In short, `HashMap` supports
+/// fully concurrent lookups, insertions, and removals.
+///
+/// [Fx Hash]: https://docs.rs/fxhash
+/// [`RandomState`]: https://doc.rust-lang.org/std/collections/hash_map/struct.RandomState.html
+/// [`with_hasher`]: #method.with_hasher
+/// [`with_capacity_and_hasher`]: #method.with_capacity_and_hasher
+/// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+/// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+/// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+/// [Junction]: https://github.com/preshing/junction
+/// [this blog post]: https://preshing.com/20160222/a-resizable-concurrent-map/
 #[derive(Default)]
 pub struct HashMap<K: Hash + Eq, V, S: BuildHasher> {
     buckets: Atomic<BucketArray<K, V, S>>,
@@ -43,20 +73,41 @@ pub struct HashMap<K: Hash + Eq, V, S: BuildHasher> {
 }
 
 impl<K: Hash + Eq, V> HashMap<K, V, FxBuildHasher> {
+    /// Creates an empty `HashMap`.
+    ///
+    /// The hash map is created with a capacity of 0 and will not allocate any
+    /// space for elements until the first insertion. However, the hash builder
+    /// `S` will be allocated on the heap.
     pub fn new() -> HashMap<K, V, FxBuildHasher> {
         HashMap::with_capacity_and_hasher(0, FxBuildHasher::default())
     }
 
+    /// Creates an empty `HashMap` with space for at least `capacity` elements
+    /// without reallocating.
+    ///
+    /// If `capacity == 0`, the hash map will not allocate any space for
+    /// elements, but it will allocate space for the hash builder.
     pub fn with_capacity(capacity: usize) -> HashMap<K, V, FxBuildHasher> {
         HashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default())
     }
 }
 
 impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
+    /// Creates an empty `HashMap` that will use `hash_builder` to hash keys.
+    ///
+    /// The created map will have a capacity of 0 and as such will not have any
+    /// space for elements allocated until the first insertion. However, the
+    /// hash builder `S` will be allocated on the heap.
     pub fn with_hasher(hash_builder: S) -> HashMap<K, V, S> {
         HashMap::with_capacity_and_hasher(0, hash_builder)
     }
 
+    /// Creates an empty `HashMap` that will hold at least `capacity` elements
+    /// without reallocating and that uses `hash_builder` to hash keys.
+    ///
+    /// If `capacity == 0`, the hash map will not allocate any space for
+    /// elements. However, the hash map will always allocate its hash builder
+    /// `S` on the heap.
     pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> HashMap<K, V, S> {
         let hash_builder = Arc::new(hash_builder);
 
@@ -78,14 +129,31 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         }
     }
 
+    /// Returns the number of elements that are confirmed to have been inserted
+    /// into this map.
+    ///
+    /// Because `HashMap` can be updated concurrently, this function reflects
+    /// the number of insert operations that have returned to the user.
+    /// In-progress insertions are not counted.
     pub fn len(&self) -> usize {
         self.len.load(Ordering::SeqCst)
     }
 
+    /// Returns true if this `HashMap` contains no confirmed inserted elements.
+    ///
+    /// In-progress insertions into this `HashMap` are not considered.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Returns the number of elements this `HashMap` can hold without
+    /// reallocating.
+    ///
+    /// If invoked while this hash map is growing, it is possible for
+    /// [`len`](#method.len) to return a greater value than this function does.
+    /// This is because new elements are being inserted into the next array of
+    /// buckets, but the `HashMap`'s bucket pointer has not been swung up the
+    /// list yet.
     pub fn capacity(&self) -> usize {
         let guard = &crossbeam_epoch::pin();
         let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
@@ -99,6 +167,20 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         buckets_ref.buckets.len() / 2
     }
 
+    /// Returns a copy of the value corresponding to `key`.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`. In addition, `V` must implement [`Clone`], as
+    /// the value may be concurrently removed at any moment, so the best we can
+    /// do is return a copy of it.
+    ///
+    /// If your `V` does not implement [`Clone`], you will have to use
+    /// [`get_and`] instead.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    /// [`get_and`]: #method.get_and
     pub fn get<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -113,6 +195,20 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
             })
     }
 
+    /// Returns a copy of the key and value corresponding to `key`.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`. In addition, `K` and `V` must implement
+    /// [`Clone`], as the bucket may be concurrently removed at any moment, so
+    /// the best we can do is return a copy of it.
+    ///
+    /// If your `K` or `V` do not implement [`Clone`], you will have to use
+    /// [`get_key_value_and`] instead.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    /// [`get_key_value_and`]: #method.get_key_value_and
     pub fn get_key_value<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q> + Clone,
@@ -127,6 +223,16 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
             })
     }
 
+    /// Invokes `func` with a reference to the value corresponding to `key`.
+    ///
+    /// `func` will only be invoked if there is a value associated with `key`
+    /// contained within this hash map.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     pub fn get_and<Q: ?Sized + Hash + Eq, F: FnOnce(&V) -> T, T>(
         &self,
         key: &Q,
@@ -144,6 +250,17 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
             })
     }
 
+    /// Invokes `func` with a reference to the key and value corresponding to
+    /// `key`.
+    ///
+    /// `func` will only be invoked if there is a value associated with `key`
+    /// contained within this hash map.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     pub fn get_key_value_and<Q: ?Sized + Hash + Eq, F: FnOnce(&K, &V) -> T, T>(
         &self,
         key: &Q,
@@ -161,47 +278,105 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
             })
     }
 
-    pub fn insert(&self, k: K, v: V) -> Option<V>
+    /// Inserts a key-value pair into the hash map, then returns a copy of the
+    /// previous value associated with `key`.
+    ///
+    /// If the key was not previously present in this hash map, [`None`] is
+    /// returned.
+    ///
+    /// `V` must implement [`Clone`] for this function, as it is possible that
+    /// other threads may still hold references to the value previously
+    /// associated with `key`. As such, the associated value cannot be moved
+    /// from.
+    ///
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    pub fn insert(&self, key: K, value: V) -> Option<V>
     where
         V: Clone,
     {
         let guard = &crossbeam_epoch::pin();
 
-        self.do_insert(k, v, guard)
+        self.do_insert(key, value, guard)
             .and_then(|bucket| bucket.maybe_value.as_ref().cloned())
     }
 
-    pub fn insert_entry(&self, k: K, v: V) -> Option<(K, V)>
+    /// Inserts a key-value pair into the hash map, then returns a copy of the
+    /// previous key-value pair.
+    ///
+    /// If the key was not previously present in this hash map, [`None`] is
+    /// returned.
+    ///
+    /// `K` and `V` must implement [`Clone`] for this function, as it is
+    /// possible that other threads may still hold references to the key-value
+    /// pair previously associated with `key`.
+    ///
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    pub fn insert_entry(&self, key: K, value: V) -> Option<(K, V)>
     where
         K: Clone,
         V: Clone,
     {
         let guard = &crossbeam_epoch::pin();
 
-        self.do_insert(k, v, guard).and_then(|bucket| {
+        self.do_insert(key, value, guard).and_then(|bucket| {
             bucket
                 .maybe_value
                 .as_ref()
-                .map(|v| (bucket.key.clone(), v.clone()))
+                .map(|previous_value| (bucket.key.clone(), previous_value.clone()))
         })
     }
 
-    pub fn insert_and<F: FnOnce(&V) -> T, T>(&self, k: K, v: V, func: F) -> Option<T> {
+    /// Inserts a key-value pair into the hash map, then invokes `func` with the
+    /// previously-associated value.
+    ///
+    /// If the key was not previously present in this hash map, [`None`] is
+    /// returned and `func` is not invoked.
+    ///
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    pub fn insert_and<F: FnOnce(&V) -> T, T>(&self, key: K, value: V, func: F) -> Option<T> {
         let guard = &crossbeam_epoch::pin();
 
-        self.do_insert(k, v, guard)
+        self.do_insert(key, value, guard)
             .and_then(|bucket| bucket.maybe_value.as_ref().map(func))
     }
 
-    pub fn insert_entry_and<F: FnOnce(&K, &V) -> T, T>(&self, k: K, v: V, func: F) -> Option<T> {
+    /// Inserts a key-value pair into the hash map, then invokes `func` with the
+    /// new key and previously-associated value.
+    ///
+    /// If the key was not previously present in this hash map, [`None`] is
+    /// returned and `func` is not invoked.
+    ///
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    pub fn insert_entry_and<F: FnOnce(&K, &V) -> T, T>(
+        &self,
+        key: K,
+        value: V,
+        func: F,
+    ) -> Option<T> {
         let guard = &crossbeam_epoch::pin();
 
-        self.do_insert(k, v, guard)
-            .and_then(|bucket| bucket.maybe_value.as_ref().map(|v| func(&bucket.key, v)))
+        self.do_insert(key, value, guard).and_then(|bucket| {
+            bucket
+                .maybe_value
+                .as_ref()
+                .map(|previous_value| func(&bucket.key, previous_value))
+        })
     }
 }
 
 impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
+    /// Removes the value associated with `key` from the hash map, returning a
+    /// copy of that value if there was one contained in this hash map.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`. `K` and `V` must implement [`Clone`] for this
+    /// function, as `K` must be cloned for the tombstone bucket and the
+    /// previously-associated value cannot be moved from, as other threads
+    /// may still hold references to it.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     pub fn remove<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -213,6 +388,18 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
             .and_then(|bucket| bucket.maybe_value.as_ref().cloned())
     }
 
+    /// Removes the value associated with `key` from the hash map, returning a
+    /// copy of that key-value pair it was contained in this hash map.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`. `K` and `V` must implement [`Clone`] for this
+    /// function. `K` must be cloned twice: once for the tombstone bucket
+    /// and once for the return value; the previously-associated value cannot be
+    /// moved from, as other threads may still hold references to it.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     pub fn remove_entry<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q>,
@@ -228,6 +415,16 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
         })
     }
 
+    /// Removes the value associated with `key` from the hash map, then returns
+    /// the result of invoking `func` with the previously-associated value.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`. `K` must implement [`Clone`] for this
+    /// function, as `K` must be cloned to create a tombstone bucket.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     pub fn remove_and<Q: Hash + Eq + ?Sized, F: FnOnce(&V) -> T, T>(
         &self,
         key: &Q,
@@ -242,6 +439,17 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
             .and_then(|bucket| bucket.maybe_value.as_ref().map(func))
     }
 
+    /// Removes the value associated with `key` from the hash map, then returns
+    /// the result of invoking `func` with the key and previously-associated
+    /// value.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`. `K` must implement [`Clone`] for this
+    /// function, as `K` must be cloned to create a tombstone bucket.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     pub fn remove_entry_and<Q: Hash + Eq + ?Sized, F: FnOnce(&K, &V) -> T, T>(
         &self,
         key: &Q,
