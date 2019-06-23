@@ -17,9 +17,14 @@ criterion = "0.2"
 hashbrown = "0.5"
 lock_api = "0.2"
 parking_lot = "0.8"
+ccl = "4.5"
 
 [[bench]]
 name = "cht"
+harness = false
+
+[[bench]]
+name = "ccl"
 harness = false
 
 [[bench]]
