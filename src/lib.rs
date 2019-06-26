@@ -32,7 +32,6 @@
 //! [Junction]: https://github.com/preshing/junction
 
 pub mod map;
-mod set; // it's not ready yet
 
 pub use map::HashMap;
 
