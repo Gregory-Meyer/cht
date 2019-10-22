@@ -36,15 +36,29 @@ use std::{
     },
 };
 
+use ahash::ABuildHasher;
 use crossbeam_epoch::{self, Atomic, Guard, Owned, Pointer, Shared};
-use fxhash::FxBuildHasher;
+
+/// Default hasher for `HashMap`.
+///
+/// This is currently [aHash], a hashing algorithm designed around acceleration
+/// by the [AES-NI] instruction set on x86 processors. aHash is not
+/// cryptographically secure, but is fast and resistant to DoS attacks. Compared
+/// to [Fx Hash], the previous default hasher, aHash is slower at hashing
+/// integers, faster at hashing strings, and provides DoS attack resistance.
+///
+/// [aHash]: https://docs.rs/ahash
+/// [AES-NI]: https://en.wikipedia.org/wiki/AES_instruction_set
+/// [Fx Hash]: https://docs.rs/fxhash
+pub type DefaultHashBuilder = ABuildHasher;
 
 /// A lockfree concurrent hash map implemented with open addressing and linear
 /// probing.
 ///
-/// The default hashing algorithm is [Fx Hash], a generally fast insecure
-/// hashing algorithm. If your application requires resistance to denial of
-/// service attacks such as HashDoS, consider using [`RandomState`] instead.
+/// The default hashing algorithm is [aHash], a hashing algorithm that is
+/// accelerated by the [AES-NI] instruction set on x86 proessors. aHash provides
+/// some resistance to DoS attacks, but will not provide the same level of
+/// resistance as something like [`RandomState`] from the standard library.
 ///
 /// The hashing algorithm to be used can be chosen on a per-`HashMap` basis
 /// using the [`with_hasher`] and [`with_capacity_and_hasher`] methods.
@@ -60,7 +74,8 @@ use fxhash::FxBuildHasher;
 /// [Junction], described in [this blog post]. In short, `HashMap` supports
 /// fully concurrent lookups, insertions, and removals.
 ///
-/// [Fx Hash]: https://docs.rs/fxhash
+/// [aHash]: https://docs.rs/ahash
+/// [AES-NI]: https://en.wikipedia.org/wiki/AES_instruction_set
 /// [`RandomState`]: https://doc.rust-lang.org/std/collections/hash_map/struct.RandomState.html
 /// [`with_hasher`]: #method.with_hasher
 /// [`with_capacity_and_hasher`]: #method.with_capacity_and_hasher
@@ -70,7 +85,7 @@ use fxhash::FxBuildHasher;
 /// [Junction]: https://github.com/preshing/junction
 /// [this blog post]: https://preshing.com/20160222/a-resizable-concurrent-map/
 #[derive(Default)]
-pub struct HashMap<K: Hash + Eq, V, S: BuildHasher = FxBuildHasher> {
+pub struct HashMap<K: Hash + Eq, V, S: BuildHasher = DefaultHashBuilder> {
     buckets: Atomic<BucketArray<K, V, S>>,
     len: AtomicUsize,
     hash_builder: Arc<S>,
@@ -82,8 +97,8 @@ impl<K: Hash + Eq, V> HashMap<K, V, FxBuildHasher> {
     /// The hash map is created with a capacity of 0 and will not allocate any
     /// space for elements until the first insertion. However, the hash builder
     /// `S` will be allocated on the heap.
-    pub fn new() -> HashMap<K, V, FxBuildHasher> {
-        HashMap::with_capacity_and_hasher(0, FxBuildHasher::default())
+    pub fn new() -> HashMap<K, V, DefaultHashBuilder> {
+        HashMap::with_capacity_and_hasher(0, DefaultHashBuilder::default())
     }
 
     /// Creates an empty `HashMap` with space for at least `capacity` elements
@@ -91,8 +106,8 @@ impl<K: Hash + Eq, V> HashMap<K, V, FxBuildHasher> {
     ///
     /// If `capacity == 0`, the hash map will not allocate any space for
     /// elements, but it will allocate space for the hash builder.
-    pub fn with_capacity(capacity: usize) -> HashMap<K, V, FxBuildHasher> {
-        HashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default())
+    pub fn with_capacity(capacity: usize) -> HashMap<K, V, DefaultHashBuilder> {
+        HashMap::with_capacity_and_hasher(capacity, DefaultHashBuilder::default())
     }
 }
 
@@ -628,7 +643,7 @@ impl<K: Eq + Hash, V, S: BuildHasher> Drop for HashMap<K, V, S> {
         let guard = unsafe { crossbeam_epoch::unprotected() };
 
         let mut buckets_ptr = self.buckets.swap(Shared::null(), Ordering::SeqCst, guard);
-        let mut freed_buckets = HashSet::with_hasher(FxBuildHasher::default());
+        let mut freed_buckets = HashSet::with_hasher(DefaultHashBuilder::default());
 
         while !buckets_ptr.is_null() {
             let this_bucket_array = unsafe { buckets_ptr.deref() };

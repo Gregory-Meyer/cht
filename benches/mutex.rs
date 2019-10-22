@@ -1,5 +1,4 @@
 use std::{
-    borrow::Borrow,
     hash::{BuildHasher, Hash},
     mem,
     sync::{
@@ -9,8 +8,8 @@ use std::{
     thread,
 };
 
+use ahash::ABuildHasher;
 use criterion::{criterion_group, criterion_main, Criterion};
-use fxhash::FxBuildHasher;
 use hashbrown::{hash_map::Entry, HashMap};
 use parking_lot::RwLock;
 
@@ -18,10 +17,10 @@ struct ConcurrentHashMap<K: Hash + Eq, V, S: BuildHasher> {
     map: RwLock<HashMap<K, Arc<RwLock<V>>, S>>,
 }
 
-impl<K: Hash + Eq, V> ConcurrentHashMap<K, V, FxBuildHasher> {
-    fn new() -> ConcurrentHashMap<K, V, FxBuildHasher> {
+impl<K: Hash + Eq, V> ConcurrentHashMap<K, V, ABuildHasher> {
+    fn new() -> ConcurrentHashMap<K, V, ABuildHasher> {
         ConcurrentHashMap {
-            map: RwLock::new(HashMap::with_hasher(FxBuildHasher::default())),
+            map: RwLock::new(HashMap::with_hasher(ABuildHasher::default())),
         }
     }
 }
@@ -55,32 +54,31 @@ impl<K: Hash + Eq, V, S: BuildHasher> ConcurrentHashMap<K, V, S> {
             }
         }
     }
-
-    fn get<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<Arc<RwLock<V>>>
-    where
-        K: Borrow<Q>,
-    {
-        let guard = self.map.read();
-        guard.get(key).cloned()
-    }
 }
 
 fn bench_single_thread_insertion(c: &mut Criterion) {
-    let map = ConcurrentHashMap::new();
-
-    c.bench_function(
+    c.bench_function_over_inputs(
         "hashbrown/parking_lot: single threaded insertion",
-        move |b| b.iter(|| map.insert(criterion::black_box(5), 5)),
+        |b, &&numel| {
+            let map = ConcurrentHashMap::new();
+
+            for i in 0..numel {
+                map.insert(i, i);
+            }
+
+            b.iter(|| map.insert(criterion::black_box(numel + 1), numel + 1))
+        },
+        [8, 64, 512, 4096, 32768].iter(),
     );
 }
 
 fn bench_multi_thread_insertion(c: &mut Criterion) {
-    const NUM_THREADS: usize = 64;
+    let num_threads = num_cpus::get();
 
     let map = Arc::new(ConcurrentHashMap::new());
     let keep_going = Arc::new(AtomicBool::new(true));
 
-    let threads: Vec<_> = (0..NUM_THREADS - 1)
+    let threads: Vec<_> = (0..num_threads - 1)
         .map(|i| {
             let map = map.clone();
             let keep_going = keep_going.clone();
@@ -95,7 +93,7 @@ fn bench_multi_thread_insertion(c: &mut Criterion) {
 
     c.bench_function("hashbrown/parking_lot: multithreaded insertion", move |b| {
         b.iter(|| {
-            map.insert(criterion::black_box(NUM_THREADS + 1), NUM_THREADS + 1);
+            map.insert(criterion::black_box(num_threads + 1), num_threads + 1);
         })
     });
 
@@ -105,12 +103,12 @@ fn bench_multi_thread_insertion(c: &mut Criterion) {
 }
 
 fn bench_multi_thread_contended_insertion(c: &mut Criterion) {
-    const NUM_THREADS: usize = 64;
+    let num_threads = num_cpus::get();
 
     let map = Arc::new(ConcurrentHashMap::new());
     let keep_going = Arc::new(AtomicBool::new(true));
 
-    let threads: Vec<_> = (0..NUM_THREADS - 1)
+    let threads: Vec<_> = (0..num_threads - 1)
         .map(|_| {
             let map = map.clone();
             let keep_going = keep_going.clone();
