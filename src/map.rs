@@ -619,17 +619,19 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
         assert!(!current_ptr.is_null());
 
         let current = unsafe { current_ptr.deref() };
+        // this can be relaxed, since we don't check its contents and later
+        // users will use the acquire load from below anyways
         let next_array_ptr = current.next_array.load(Ordering::Relaxed, guard);
         assert!(!next_array_ptr.is_null());
 
-        // all operations can be relaxed, since the destructor will issue an
-        // acquire fence and we don't modify *current_ptr or *next_array_ptr
+        // whatever the case, we need an acquire here so that the array_ptr has
+        // its contents updated in this thread
         if self
             .buckets
             .compare_and_set(
                 current_ptr,
                 next_array_ptr,
-                (Ordering::Relaxed, Ordering::Relaxed),
+                (Ordering::Acquire, Ordering::Acquire),
                 guard,
             )
             .is_ok()
@@ -918,7 +920,6 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
     }
 
     fn grow(&self, guard: &'g Guard) -> Shared<'g, BucketArray<K, V, S>> {
-        // acquire so we know the array is initialized
         let maybe_next_array_ptr = self.next_array.load_consume(guard);
 
         if !maybe_next_array_ptr.is_null() {
