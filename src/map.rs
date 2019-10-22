@@ -91,7 +91,7 @@ pub struct HashMap<K: Hash + Eq, V, S: BuildHasher = DefaultHashBuilder> {
     hash_builder: Arc<S>,
 }
 
-impl<K: Hash + Eq, V> HashMap<K, V, FxBuildHasher> {
+impl<K: Hash + Eq, V> HashMap<K, V, DefaultHashBuilder> {
     /// Creates an empty `HashMap`.
     ///
     /// The hash map is created with a capacity of 0 and will not allocate any
