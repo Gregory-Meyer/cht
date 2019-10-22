@@ -9,8 +9,8 @@ readme = "README.md"
 license = "MIT"
 
 [dependencies]
+ahash = "0.2"
 crossbeam-epoch = "0.7"
-fxhash = "0.2"
 
 [dev-dependencies]
 criterion = "0.2"
