@@ -22,7 +22,7 @@ fn bench_single_thread_insertion(c: &mut Criterion) {
 
             b.iter(|| map.insert(criterion::black_box(numel + 1), numel + 1))
         },
-        [8, 64, 512, 4096, 32768].into_iter(),
+        [8, 64, 512, 4096, 32768].iter(),
     );
 }
 
