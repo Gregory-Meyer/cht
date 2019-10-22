@@ -73,12 +73,12 @@ fn bench_single_thread_insertion(c: &mut Criterion) {
 }
 
 fn bench_multi_thread_insertion(c: &mut Criterion) {
-    const NUM_THREADS: usize = 64;
+    let num_threads = num_cpus::get();
 
     let map = Arc::new(ConcurrentHashMap::new());
     let keep_going = Arc::new(AtomicBool::new(true));
 
-    let threads: Vec<_> = (0..NUM_THREADS - 1)
+    let threads: Vec<_> = (0..num_threads - 1)
         .map(|i| {
             let map = map.clone();
             let keep_going = keep_going.clone();
@@ -93,7 +93,7 @@ fn bench_multi_thread_insertion(c: &mut Criterion) {
 
     c.bench_function("hashbrown/parking_lot: multithreaded insertion", move |b| {
         b.iter(|| {
-            map.insert(criterion::black_box(NUM_THREADS + 1), NUM_THREADS + 1);
+            map.insert(criterion::black_box(num_threads + 1), num_threads + 1);
         })
     });
 
@@ -103,12 +103,12 @@ fn bench_multi_thread_insertion(c: &mut Criterion) {
 }
 
 fn bench_multi_thread_contended_insertion(c: &mut Criterion) {
-    const NUM_THREADS: usize = 64;
+    let num_threads = num_cpus::get();
 
     let map = Arc::new(ConcurrentHashMap::new());
     let keep_going = Arc::new(AtomicBool::new(true));
 
-    let threads: Vec<_> = (0..NUM_THREADS - 1)
+    let threads: Vec<_> = (0..num_threads - 1)
         .map(|_| {
             let map = map.clone();
             let keep_going = keep_going.clone();
