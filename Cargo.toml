@@ -13,10 +13,11 @@ ahash = "0.2"
 crossbeam-epoch = "0.7"
 
 [dev-dependencies]
-criterion = "0.2"
-hashbrown = "0.5"
-lock_api = "0.2"
-parking_lot = "0.8"
+criterion = "0.3"
+hashbrown = "0.6"
+lock_api = "0.3"
+num_cpus = "1.10"
+parking_lot = "0.9"
 
 [[bench]]
 name = "cht"
