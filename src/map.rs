@@ -846,7 +846,7 @@ struct BucketArray<K: Hash + Eq, V, S: BuildHasher> {
 impl<K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
     fn with_capacity_and_hasher(capacity: usize, hash_builder: Arc<S>) -> BucketArray<K, V, S> {
         BucketArray {
-            buckets: vec![Atomic::null(); round_up_to_next_power_of_2(capacity * 2)],
+            buckets: vec![Atomic::null(); (capacity * 2).next_power_of_two()],
             len: AtomicUsize::new(0),
             next_array: Atomic::null(),
             hash_builder,
@@ -1177,23 +1177,5 @@ struct Bucket<K: Hash + Eq, V> {
 impl<K: Hash + Eq, V> Bucket<K, V> {
     fn is_tombstone(&self) -> bool {
         self.maybe_value.is_none()
-    }
-}
-
-fn round_up_to_next_power_of_2(x: usize) -> usize {
-    if is_power_of_2(x) {
-        return x;
-    }
-
-    let first_set = (mem::size_of::<usize>() * 8) as u32 - x.leading_zeros();
-
-    1 << first_set
-}
-
-fn is_power_of_2(x: usize) -> bool {
-    if x == 0 {
-        false
-    } else {
-        (x & (x - 1)) == 0
     }
 }
