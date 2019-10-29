@@ -205,13 +205,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         K: Borrow<Q>,
         V: Clone,
     {
-        let guard = &crossbeam_epoch::pin();
-
-        self.get_bucket(key, guard)
-            .and_then(|b| match &b.maybe_value {
-                Some(v) => Some(v.clone()),
-                None => None,
-            })
+        self.get_and(key, V::clone)
     }
 
     /// Returns a copy of the key and value corresponding to `key`.
@@ -233,13 +227,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         K: Borrow<Q> + Clone,
         V: Clone,
     {
-        let guard = &crossbeam_epoch::pin();
-
-        self.get_bucket(key, guard)
-            .and_then(|b| match &b.maybe_value {
-                Some(v) => Some((b.key.clone(), v.clone())),
-                None => None,
-            })
+        self.get_key_value_and(key, |k, v| (k.clone(), v.clone()))
     }
 
     /// Invokes `func` with a reference to the value corresponding to `key`.
@@ -260,13 +248,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
-        let guard = &crossbeam_epoch::pin();
-
-        self.get_bucket(key, guard)
-            .and_then(move |b| match &b.maybe_value {
-                Some(v) => Some(func(v)),
-                None => None,
-            })
+        self.get_key_value_and(key, move |_, v| func(v))
     }
 
     /// Invokes `func` with a reference to the key and value corresponding to
@@ -313,10 +295,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         V: Clone,
     {
-        let guard = &crossbeam_epoch::pin();
-
-        self.do_insert(key, value, guard)
-            .and_then(|bucket| bucket.maybe_value.as_ref().cloned())
+        self.insert_and(key, value, V::clone)
     }
 
     /// Inserts a key-value pair into the hash map, then returns a copy of the
@@ -335,14 +314,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         K: Clone,
         V: Clone,
     {
-        let guard = &crossbeam_epoch::pin();
-
-        self.do_insert(key, value, guard).and_then(|bucket| {
-            bucket
-                .maybe_value
-                .as_ref()
-                .map(|previous_value| (bucket.key.clone(), previous_value.clone()))
-        })
+        self.insert_entry_and(key, value, |k, v| (k.clone(), v.clone()))
     }
 
     /// Inserts a key-value pair into the hash map, then invokes `func` with the
@@ -353,10 +325,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     pub fn insert_and<F: FnOnce(&V) -> T, T>(&self, key: K, value: V, func: F) -> Option<T> {
-        let guard = &crossbeam_epoch::pin();
-
-        self.do_insert(key, value, guard)
-            .and_then(|bucket| bucket.maybe_value.as_ref().map(func))
+        self.insert_entry_and(key, value, move |_, v| func(v))
     }
 
     /// Inserts a key-value pair into the hash map, then invokes `func` with the
@@ -401,10 +370,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
         K: Borrow<Q>,
         V: Clone,
     {
-        let guard = &crossbeam_epoch::pin();
-
-        self.do_remove(key, guard)
-            .and_then(|bucket| bucket.maybe_value.as_ref().cloned())
+        self.remove_and(key, V::clone)
     }
 
     /// Removes the value associated with `key` from the hash map, returning a
@@ -424,14 +390,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
         K: Borrow<Q>,
         V: Clone,
     {
-        let guard = &crossbeam_epoch::pin();
-
-        self.do_remove(key, guard).and_then(|bucket| {
-            bucket
-                .maybe_value
-                .as_ref()
-                .map(|v| (bucket.key.clone(), v.clone()))
-        })
+        self.remove_entry_and(key, |k, v| (k.clone(), v.clone()))
     }
 
     /// Removes the value associated with `key` from the hash map, then returns
@@ -452,10 +411,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
-        let guard = &crossbeam_epoch::pin();
-
-        self.do_remove(key, guard)
-            .and_then(|bucket| bucket.maybe_value.as_ref().map(func))
+        self.remove_entry_and(key, move |_, v| func(v))
     }
 
     /// Removes the value associated with `key` from the hash map, then returns
