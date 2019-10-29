@@ -465,7 +465,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
     where
         V: Clone,
     {
-        self.insert_with_or_modify_and(key, move || value, on_modify, V::clone)
+        self.insert_or_modify_and(key, value, on_modify, V::clone)
     }
 
     /// Insert the result of `on_insert` if no value is associated with `key` or
