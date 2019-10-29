@@ -31,7 +31,7 @@ use std::{
     hash::{BuildHasher, Hash, Hasher},
     mem,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{self, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -155,7 +155,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// the number of insert operations that have returned to the user.
     /// In-progress insertions are not counted.
     pub fn len(&self) -> usize {
-        self.len.load(Ordering::SeqCst)
+        self.len.load(Ordering::Relaxed)
     }
 
     /// Returns true if this `HashMap` contains no confirmed inserted elements.
@@ -175,7 +175,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// list yet.
     pub fn capacity(&self) -> usize {
         let guard = &crossbeam_epoch::pin();
-        let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
+        let buckets_ptr = self.buckets.load_consume(guard);
 
         if buckets_ptr.is_null() {
             return 0;
@@ -495,7 +495,7 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
     {
         let hash = self.get_hash(&key);
 
-        let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
+        let buckets_ptr = self.buckets.load_consume(guard);
 
         if buckets_ptr.is_null() {
             return None;
@@ -528,14 +528,19 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
 
         if let Some(previous_bucket) = unsafe { previous_bucket_ptr.as_ref() } {
             if previous_bucket.maybe_value.is_none() {
-                self.len.fetch_add(1, Ordering::SeqCst);
+                self.len.fetch_add(1, Ordering::Relaxed);
             }
         } else {
-            self.len.fetch_add(1, Ordering::SeqCst);
+            self.len.fetch_add(1, Ordering::Relaxed);
         }
 
         if !previous_bucket_ptr.is_null() {
-            unsafe { guard.defer_destroy(previous_bucket_ptr) };
+            unsafe {
+                guard.defer_unchecked(move || {
+                    atomic::fence(Ordering::Acquire);
+                    mem::drop(previous_bucket_ptr.into_owned());
+                })
+            };
         }
 
         if redirected {
@@ -553,7 +558,7 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q> + Clone,
     {
-        let buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
+        let buckets_ptr = self.buckets.load_consume(guard);
 
         if buckets_ptr.is_null() {
             return None;
@@ -565,8 +570,14 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
         let removed_ptr = buckets_ref.remove(key, hash, None, guard);
 
         if !removed_ptr.is_null() {
-            unsafe { guard.defer_destroy(removed_ptr) };
-            self.len.fetch_sub(1, Ordering::SeqCst);
+            unsafe {
+                guard.defer_unchecked(move || {
+                    atomic::fence(Ordering::Acquire);
+                    mem::drop(removed_ptr.into_owned());
+                })
+            };
+
+            self.len.fetch_sub(1, Ordering::Relaxed);
 
             Some(unsafe { removed_ptr.deref() })
         } else {
@@ -584,7 +595,7 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
     fn get_or_create_buckets(&self, guard: &'g Guard) -> Shared<'g, BucketArray<K, V, S>> {
         const DEFAULT_CAPACITY: usize = 64;
 
-        let mut buckets_ptr = self.buckets.load(Ordering::SeqCst, guard);
+        let mut buckets_ptr = self.buckets.load_consume(guard);
         let mut maybe_new_buckets = None;
 
         loop {
@@ -600,7 +611,7 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
                 match self.buckets.compare_and_set_weak(
                     Shared::null(),
                     new_buckets,
-                    Ordering::SeqCst,
+                    (Ordering::AcqRel, Ordering::Acquire),
                     guard,
                 ) {
                     Ok(new_buckets) => return new_buckets,
@@ -623,26 +634,45 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
         assert!(!current_ptr.is_null());
 
         let current = unsafe { current_ptr.deref() };
-        let next_array_ptr = current.next_array.load(Ordering::SeqCst, guard);
+        // this can be relaxed, since we don't check its contents and later
+        // users will use the acquire load from below anyways
+        let next_array_ptr = current.next_array.load(Ordering::Relaxed, guard);
         assert!(!next_array_ptr.is_null());
 
+        // whatever the case, we need an acquire here so that the array_ptr has
+        // its contents updated in this thread
         if self
             .buckets
-            .compare_and_set_weak(current_ptr, next_array_ptr, Ordering::SeqCst, guard)
+            .compare_and_set(
+                current_ptr,
+                next_array_ptr,
+                (Ordering::Acquire, Ordering::Acquire),
+                guard,
+            )
             .is_ok()
         {
             unsafe {
-                guard.defer_destroy(current_ptr);
-            }
+                guard.defer_unchecked(move || {
+                    atomic::fence(Ordering::Acquire);
+                    mem::drop(current_ptr.into_owned());
+                })
+            };
         }
     }
 }
 
 impl<K: Eq + Hash, V, S: BuildHasher> Drop for HashMap<K, V, S> {
     fn drop(&mut self) {
+        // ensure all loads have the most recent data available
+        atomic::fence(Ordering::Acquire);
+
+        // all opeations can have relaxed memory ordering, since drop is called
+        // with a mutable reference, forbidding any other thread from even
+        // holding a reference to the map
+
         let guard = unsafe { crossbeam_epoch::unprotected() };
 
-        let mut buckets_ptr = self.buckets.swap(Shared::null(), Ordering::SeqCst, guard);
+        let mut buckets_ptr = self.buckets.swap(Shared::null(), Ordering::Relaxed, guard);
         let mut freed_buckets = HashSet::with_hasher(DefaultHashBuilder::default());
 
         while !buckets_ptr.is_null() {
@@ -650,11 +680,11 @@ impl<K: Eq + Hash, V, S: BuildHasher> Drop for HashMap<K, V, S> {
             let new_buckets_ptr =
                 this_bucket_array
                     .next_array
-                    .swap(Shared::null(), Ordering::SeqCst, guard);
+                    .swap(Shared::null(), Ordering::Relaxed, guard);
 
             for this_bucket in this_bucket_array.buckets.iter() {
                 let this_bucket_ptr = this_bucket
-                    .swap(Shared::null(), Ordering::SeqCst, guard)
+                    .swap(Shared::null(), Ordering::Relaxed, guard)
                     .with_tag(0);
 
                 if this_bucket_ptr.is_null() {
@@ -715,7 +745,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
         for this_bucket_ptr in (0..capacity)
             .map(|x| (x + offset) & (capacity - 1))
             .map(|i| &self.buckets[i])
-            .map(|this_bucket| this_bucket.load(Ordering::SeqCst, guard))
+            .map(|this_bucket| this_bucket.load_consume(guard))
         {
             if let Some(this_bucket_ref) = unsafe { this_bucket_ptr.as_ref() } {
                 if this_bucket_ref.key.borrow() != key {
@@ -724,7 +754,9 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                     return (this_bucket_ptr, false);
                 }
 
-                let next_array_ptr = self.next_array.load(Ordering::SeqCst, guard);
+                // consume load from this_bucket isn't strong enough to publish
+                // writes to *self.next_array
+                let next_array_ptr = self.next_array.load_consume(guard);
                 assert!(!next_array_ptr.is_null());
                 let next_array = unsafe { next_array_ptr.deref() };
                 self.grow_into(next_array, guard);
@@ -751,7 +783,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
 
         let bucket = unsafe { bucket_ptr.deref() };
         let capacity = self.buckets.len();
-        let len = self.len.load(Ordering::SeqCst);
+        let len = self.len.load(Ordering::Relaxed);
 
         let insert_into = |next_array_ptr: Shared<'_, BucketArray<K, V, S>>| {
             assert!(!next_array_ptr.is_null());
@@ -770,7 +802,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
 
         let grow_into_next_if_and_insert_into_next = |have_seen_redirect| {
             let next_array_ptr = if have_seen_redirect {
-                let next_array_ptr = self.next_array.load(Ordering::SeqCst, guard);
+                let next_array_ptr = self.next_array.load_consume(guard);
                 assert!(!next_array_ptr.is_null());
                 let next_array = unsafe { next_array_ptr.deref() };
                 self.grow_into(next_array, guard);
@@ -790,7 +822,8 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
             .map(|x| (x + offset) & (capacity - 1))
             .map(|i| &self.buckets[i])
         {
-            let mut this_bucket_ptr = this_bucket.load(Ordering::SeqCst, guard);
+            // to ensure the store to the key is visible in this thread
+            let mut this_bucket_ptr = this_bucket.load_consume(guard);
 
             loop {
                 have_seen_redirect = have_seen_redirect || (this_bucket_ptr.tag() == REDIRECT_TAG);
@@ -813,13 +846,13 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                 match this_bucket.compare_and_set_weak(
                     this_bucket_ptr,
                     bucket_ptr,
-                    Ordering::SeqCst,
+                    (Ordering::AcqRel, Ordering::Acquire),
                     guard,
                 ) {
                     Ok(_) => {
                         if should_increment_len {
                             // replaced a tombstone
-                            self.len.fetch_add(1, Ordering::SeqCst);
+                            self.len.fetch_add(1, Ordering::Relaxed);
                         }
 
                         return (this_bucket_ptr, false);
@@ -849,7 +882,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
             .map(|x| (x + offset) & (capacity - 1))
             .map(|i| &self.buckets[i])
         {
-            let mut this_bucket_ptr = this_bucket.load(Ordering::SeqCst, guard);
+            let mut this_bucket_ptr = this_bucket.load_consume(guard);
 
             loop {
                 if this_bucket_ptr.is_null() {
@@ -882,11 +915,11 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                 match this_bucket.compare_and_set_weak(
                     this_bucket_ptr,
                     new_bucket,
-                    Ordering::SeqCst,
+                    (Ordering::AcqRel, Ordering::Acquire),
                     guard,
                 ) {
                     Ok(_) => {
-                        self.len.fetch_sub(1, Ordering::SeqCst);
+                        self.len.fetch_sub(1, Ordering::Relaxed);
 
                         return this_bucket_ptr;
                     }
@@ -902,7 +935,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
     }
 
     fn grow(&self, guard: &'g Guard) -> Shared<'g, BucketArray<K, V, S>> {
-        let maybe_next_array_ptr = self.next_array.load(Ordering::SeqCst, guard);
+        let maybe_next_array_ptr = self.next_array.load_consume(guard);
 
         if !maybe_next_array_ptr.is_null() {
             let next_array = unsafe { maybe_next_array_ptr.deref() };
@@ -917,7 +950,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                 self.buckets.len() * 2,
                 self.hash_builder.clone(),
             )),
-            Ordering::SeqCst,
+            (Ordering::AcqRel, Ordering::Acquire),
             guard,
         ) {
             Ok(new_array_ptr) => new_array_ptr,
@@ -934,7 +967,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
 
     fn grow_into(&self, next_array: &'g BucketArray<K, V, S>, guard: &'g Guard) {
         for this_bucket in self.buckets.iter() {
-            let mut this_bucket_ptr = this_bucket.load(Ordering::SeqCst, guard);
+            let mut this_bucket_ptr = this_bucket.load_consume(guard);
 
             loop {
                 if this_bucket_ptr.tag() == REDIRECT_TAG {
@@ -948,7 +981,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                         match this_bucket.compare_and_set_weak(
                             this_bucket_ptr,
                             this_bucket_ptr.with_tag(REDIRECT_TAG),
-                            Ordering::SeqCst,
+                            (Ordering::AcqRel, Ordering::Acquire),
                             guard,
                         ) {
                             Ok(_) => break,
@@ -970,7 +1003,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                     match this_bucket.compare_and_set(
                         this_bucket_ptr,
                         this_bucket_ptr.with_tag(REDIRECT_TAG),
-                        Ordering::SeqCst,
+                        (Ordering::AcqRel, Ordering::Acquire),
                         guard,
                     ) {
                         Ok(_) => break,
@@ -985,7 +1018,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                     match this_bucket.compare_and_set_weak(
                         Shared::null(),
                         Shared::null().with_tag(REDIRECT_TAG),
-                        Ordering::SeqCst,
+                        (Ordering::AcqRel, Ordering::Acquire),
                         guard,
                     ) {
                         Ok(_) => break,
@@ -997,7 +1030,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
     }
 
     fn get_next(&self, guard: &'g Guard) -> Option<&'g BucketArray<K, V, S>> {
-        unsafe { self.next_array.load(Ordering::SeqCst, guard).as_ref() }
+        unsafe { self.next_array.load_consume(guard).as_ref() }
     }
 }
 
