@@ -352,6 +352,114 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
                 .map(|previous_value| func(&bucket.key, previous_value))
         })
     }
+
+    /// Insert the a new value if none is associated with `key` or replace the
+    /// value with the result of `on_modify`, then return a clone of the old
+    /// value.
+    ///
+    /// If there is no value associated with `key`, [`None`] will be returned
+    /// and `on_modify` will not be invoked. Otherwise, `on_modify` may be
+    /// invoked multiple times depending on how much write contention there is
+    /// on the bucket associated with `key`.
+    ///
+    /// It is possible for `on_modify` to be invoked even if [`None`] is
+    /// returned if other threads are also writing to the bucket associated with
+    /// `key`.
+    ///
+    /// `V` must implement [`Clone`] for this function, as it is possible that
+    /// other threads may still hold references to the value previously
+    /// associated with `key`. As such, the value previously associated with
+    /// `key` cannot be moved from.
+    ///
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    pub fn insert_or_modify<F: FnMut(&V) -> V>(&self, key: K, value: V, on_modify: F) -> Option<V>
+    where
+        V: Clone,
+    {
+        self.insert_or_modify_and(key, value, on_modify, V::clone)
+    }
+
+    /// Insert the result of `on_insert` if no value is associated with `key` or
+    /// replace the value with the result of `on_modify`, then return a clone of
+    /// the old value.
+    ///
+    /// If there is no value associated with `key`, `on_insert` will be invoked,
+    /// `on_modify` will not be invoked, and [`None`] will be returned.
+    /// Otherwise, `on_modify` may be invoked multiple times depending on how
+    /// much write contention there is on the bucket associate with `key`.
+    ///
+    /// It is possible for both `on_insert` and `on_modify` to be invoked, even
+    /// if [`None`] is returned, if other threads are also writing to the bucket
+    /// associated with `key`.
+    ///
+    /// `V` must implement [`Clone`] for this function, as it is possible that
+    /// other threads may still hold references to the value previously
+    /// associated with `key`. As such, the value previously associated with
+    /// `key` cannot be moved from.
+    ///
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    pub fn insert_with_or_modify<F: FnOnce() -> V, G: FnMut(&V) -> V>(
+        &self,
+        key: K,
+        on_insert: F,
+        on_modify: G,
+    ) -> Option<V>
+    where
+        V: Clone,
+    {
+        self.insert_with_or_modify_and(key, on_insert, on_modify, V::clone)
+    }
+
+    /// Insert the a new value if none is associated with `key` or replace the
+    /// value with the result of `on_modify`, then return the result of
+    /// `with_old_value` using the old value.
+    ///
+    /// If there is no value associated with `key`, [`None`] will be returned
+    /// and `on_modify` and `with_old_value` will not be invoked. Otherwise,
+    /// `on_modify` may be invoked multiple times depending on how much write
+    /// contention there is on the bucket associated with `key`.
+    ///
+    /// It is possible for `on_modify` to be invoked even if [`None`] is
+    /// returned if other threads are also writing to the bucket associated with
+    /// `key`.
+    ///
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    pub fn insert_or_modify_and<F: FnMut(&V) -> V, G: FnOnce(&V) -> T, T>(
+        &self,
+        key: K,
+        value: V,
+        on_modify: F,
+        with_old_value: G,
+    ) -> Option<T> {
+        self.insert_with_or_modify_and(key, move || value, on_modify, with_old_value)
+    }
+
+    /// Insert the result of `on_insert` if no value is associated with `key` or
+    /// replace the value with the result of `on_modify`, then return the result
+    /// of `with_old_value` using the old value.
+    ///
+    /// If there is no value associated with `key`, `on_insert` will be invoked,
+    /// `on_modify` and `with_old_value`, will not be invoked, and [`None`] will
+    /// be returned. Otherwise, `on_modify` may be invoked multiple times
+    /// depending on how much write contention there is on the bucket associate
+    /// with `key`.
+    ///
+    /// It is possible for both `on_insert` and `on_modify` to be invoked, even
+    /// if [`None`] is returned, if other threads are also writing to the bucket
+    /// associated with `key`.
+    ///
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    pub fn insert_with_or_modify_and<F: FnOnce() -> V, G: FnMut(&V) -> V, H: FnOnce(&V) -> T, T>(
+        &self,
+        key: K,
+        on_insert: F,
+        on_modify: G,
+        with_old_value: H,
+    ) -> Option<T> {
+        unimplemented!()
+    }
 }
 
 impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
@@ -439,122 +547,6 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
 
         self.do_remove(key, guard)
             .and_then(|bucket| bucket.maybe_value.as_ref().map(|v| func(&bucket.key, v)))
-    }
-
-    /// Insert the a new value if none is associated with `key` or replace the
-    /// value with the result of `on_modify`, then return a clone of the old
-    /// value.
-    ///
-    /// If there is no value associated with `key`, [`None`] will be returned
-    /// and `on_modify` will not be invoked. Otherwise, `on_modify` may be
-    /// invoked multiple times depending on how much write contention there is
-    /// on the bucket associated with `key`.
-    ///
-    /// It is possible for `on_modify` to be invoked even if [`None`] is
-    /// returned if other threads are also writing to the bucket associated with
-    /// `key`.
-    ///
-    /// `V` must implement [`Clone`] for this function, as it is possible that
-    /// other threads may still hold references to the value previously
-    /// associated with `key`. As such, the value previously associated with
-    /// `key` cannot be moved from.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
-    pub fn insert_or_modify<F: FnMut(&V) -> V>(&self, key: K, value: V, on_modify: F) -> Option<V>
-    where
-        V: Clone,
-    {
-        self.insert_or_modify_and(key, value, on_modify, V::clone)
-    }
-
-    /// Insert the result of `on_insert` if no value is associated with `key` or
-    /// replace the value with the result of `on_modify`, then return a clone of
-    /// the old value.
-    ///
-    /// If there is no value associated with `key`, `on_insert` will be invoked,
-    /// `on_modify` will not be invoked, and [`None`] will be returned.
-    /// Otherwise, `on_modify` may be invoked multiple times depending on how
-    /// much write contention there is on the bucket associate with `key`.
-    ///
-    /// It is possible for both `on_insert` and `on_modify` to be invoked, even
-    /// if [`None`] is returned, if other threads are also writing to the bucket
-    /// associated with `key`.
-    ///
-    /// `V` must implement [`Clone`] for this function, as it is possible that
-    /// other threads may still hold references to the value previously
-    /// associated with `key`. As such, the value previously associated with
-    /// `key` cannot be moved from.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
-    pub fn insert_with_or_modify<F: FnOnce() -> V, G: FnMut(&V) -> V>(
-        &self,
-        key: K,
-        on_insert: F,
-        on_modify: G,
-    ) -> Option<V>
-    where
-        V: Clone,
-    {
-        self.insert_with_or_modify_and(key, on_insert, on_modify, V::clone)
-    }
-
-    /// Insert the a new value if none is associated with `key` or replace the
-    /// value with the result of `on_modify`, then return the result of
-    /// `with_old_value` using the old value.
-    ///
-    /// If there is no value associated with `key`, [`None`] will be returned
-    /// and `on_modify` and `with_old_value` will not be invoked. Otherwise,
-    /// `on_modify` may be invoked multiple times depending on how much write
-    /// contention there is on the bucket associated with `key`.
-    ///
-    /// It is possible for `on_modify` to be invoked even if [`None`] is
-    /// returned if other threads are also writing to the bucket associated with
-    /// `key`.
-    ///
-    /// `K` must implement [`Clone`] for this function to create a new bucket
-    /// if one already exists.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
-    pub fn insert_or_modify_and<F: FnMut(&V) -> V, G: FnOnce(&V) -> T, T>(
-        &self,
-        key: K,
-        value: V,
-        on_modify: F,
-        with_old_value: G,
-    ) -> Option<T> {
-        self.insert_with_or_modify_and(key, move || value, on_modify, with_old_value)
-    }
-
-    /// Insert the result of `on_insert` if no value is associated with `key` or
-    /// replace the value with the result of `on_modify`, then return the result
-    /// of `with_old_value` using the old value.
-    ///
-    /// If there is no value associated with `key`, `on_insert` will be invoked,
-    /// `on_modify` and `with_old_value`, will not be invoked, and [`None`] will
-    /// be returned. Otherwise, `on_modify` may be invoked multiple times
-    /// depending on how much write contention there is on the bucket associate
-    /// with `key`.
-    ///
-    /// It is possible for both `on_insert` and `on_modify` to be invoked, even
-    /// if [`None`] is returned, if other threads are also writing to the bucket
-    /// associated with `key`.
-    ///
-    /// `K` must implement [`Clone`] for this function to create a new bucket
-    /// if one already exists.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
-    pub fn insert_with_or_modify_and<F: FnOnce() -> V, G: FnMut(&V) -> V, H: FnOnce(&V) -> T, T>(
-        &self,
-        key: K,
-        on_insert: F,
-        on_modify: G,
-        with_old_value: H,
-    ) -> Option<T> {
-        unimplemented!()
     }
 
     /// Replace the value associated with `key` with the result of `on_modify`
@@ -1375,6 +1367,20 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
 struct Bucket<K: Hash + Eq, V> {
     key: K,
     maybe_value: Option<V>,
+}
+
+enum FunctionOrValue<T, F: FnOnce() -> T> {
+    Function(F),
+    Value(T),
+}
+
+impl<T, F: FnOnce() -> T> FunctionOrValue<T, F> {
+    fn into_value(self) -> T {
+        match self {
+            FunctionOrValue::Function(f) => f(),
+            FunctionOrValue::Value(v) => v,
+        }
+    }
 }
 
 impl<K: Hash + Eq, V> Bucket<K, V> {
