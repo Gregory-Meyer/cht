@@ -200,7 +200,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     /// [`get_and`]: #method.get_and
-    pub fn get<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> Option<V>
+    pub fn get<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         V: Clone,
@@ -222,7 +222,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     /// [`get_key_value_and`]: #method.get_key_value_and
-    pub fn get_key_value<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> Option<(K, V)>
+    pub fn get_key_value<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q> + Clone,
         V: Clone,
@@ -240,7 +240,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    pub fn get_and<Q: ?Sized + Hash + Eq, F: FnOnce(&V) -> T, T>(
+    pub fn get_and<Q: Hash + Eq + ?Sized, F: FnOnce(&V) -> T, T>(
         &self,
         key: &Q,
         func: F,
@@ -262,7 +262,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    pub fn get_key_value_and<Q: ?Sized + Hash + Eq, F: FnOnce(&K, &V) -> T, T>(
+    pub fn get_key_value_and<Q: Hash + Eq + ?Sized, F: FnOnce(&K, &V) -> T, T>(
         &self,
         key: &Q,
         func: F,
@@ -580,7 +580,11 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    pub fn modify<Q: Hash + Eq, F: FnMut(&V) -> V>(&self, key: &Q, on_modify: F) -> Option<V>
+    pub fn modify<Q: Hash + Eq + ?Sized, F: FnMut(&V) -> V>(
+        &self,
+        key: &Q,
+        on_modify: F,
+    ) -> Option<V>
     where
         K: Borrow<Q>,
         V: Clone,
@@ -608,18 +612,21 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    pub fn modify_and<Q: Hash + Eq, F: FnMut(&V) -> V, G: FnOnce(&V) -> T, T>(
+    pub fn modify_and<Q: Hash + Eq + ?Sized, F: FnMut(&V) -> V, G: FnOnce(&V) -> T, T>(
         &self,
         key: &Q,
         on_modify: F,
         with_old_value: G,
-    ) -> Option<T> {
+    ) -> Option<T>
+    where
+        K: Borrow<Q>,
+    {
         unimplemented!()
     }
 }
 
 impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
-    fn get_bucket<Q: ?Sized + Hash + Eq>(
+    fn get_bucket<Q: Hash + Eq + ?Sized>(
         &self,
         key: &Q,
         guard: &'g Guard,
@@ -719,7 +726,7 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
         }
     }
 
-    fn get_hash<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> u64 {
+    fn get_hash<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> u64 {
         let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
 
@@ -864,7 +871,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
 const REDIRECT_TAG: usize = 1;
 
 impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
-    fn get<Q: ?Sized + Hash + Eq>(
+    fn get<Q: Hash + Eq + ?Sized>(
         &self,
         key: &Q,
         hash: u64,
@@ -1007,7 +1014,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
         guard: &'g Guard,
     ) -> Shared<'g, Bucket<K, V>>
     where
-        K: Borrow<Q> + Clone,
+        K: Clone + Borrow<Q>,
     {
         let capacity = self.buckets.len();
         let offset = (hash & (capacity - 1) as u64) as usize;
