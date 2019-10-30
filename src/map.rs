@@ -621,7 +621,10 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
-        unimplemented!()
+        let guard = &crossbeam_epoch::pin();
+
+        self.do_modify(key, on_modify, guard)
+            .and_then(move |b| b.maybe_value.as_ref().map(with_old_value))
     }
 }
 
@@ -726,6 +729,43 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
         }
 
         unsafe { removed_ptr.as_ref() }
+    }
+
+    fn do_modify<Q: Hash + Eq + ?Sized, F: FnMut(&V) -> V>(
+        &self,
+        key: &Q,
+        modifier: F,
+        guard: &'g Guard,
+    ) -> Option<&'g Bucket<K, V>>
+    where
+        K: Borrow<Q> + Clone,
+    {
+        let buckets_ptr = self.buckets.load_consume(guard);
+
+        if buckets_ptr.is_null() {
+            return None;
+        }
+
+        let buckets = unsafe { buckets_ptr.deref() };
+        let hash = self.get_hash(key);
+
+        let (previous_bucket_ptr, new_buckets_ptr) =
+            buckets.modify(key, hash, modifier, None, guard);
+
+        if !previous_bucket_ptr.is_null() {
+            unsafe {
+                guard.defer_unchecked(move || {
+                    atomic::fence(Ordering::Acquire);
+                    mem::drop(previous_bucket_ptr.into_owned());
+                })
+            };
+        }
+
+        if buckets_ptr != new_buckets_ptr {
+            self.swing_bucket_array_ptr(buckets_ptr, new_buckets_ptr, guard);
+        }
+
+        unsafe { previous_bucket_ptr.as_ref() }
     }
 
     fn get_hash<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> u64 {
@@ -1111,6 +1151,89 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
         }
 
         (Shared::null(), (self as *const BucketArray<K, V, S>).into())
+    }
+
+    fn modify<Q: Hash + Eq + ?Sized, F: FnMut(&V) -> V>(
+        &self,
+        key: &Q,
+        hash: u64,
+        mut modifier: F,
+        maybe_new_bucket_ptr: Option<Owned<Bucket<K, V>>>,
+        guard: &'g Guard,
+    ) -> (Shared<'g, Bucket<K, V>>, Shared<'g, BucketArray<K, V, S>>)
+    where
+        K: Clone + Borrow<Q>,
+    {
+        let self_ptr: Shared<'g, BucketArray<K, V, S>> = (self as *const Self).into();
+
+        let capacity = self.buckets.len();
+        let offset = (hash & (self.buckets.len() - 1) as u64) as usize;
+
+        for this_bucket in (0..capacity)
+            .map(|x| (x + offset) & (capacity - 1))
+            .map(|i| &self.buckets[i])
+        {
+            let mut this_bucket_ptr = this_bucket.load_consume(guard);
+
+            let mut this_bucket_ref = match unsafe { this_bucket_ptr.as_ref() } {
+                Some(b) => b,
+                None => return (Shared::null(), self_ptr),
+            };
+
+            // buckets will never have their key changed, so we only have to
+            // make this check once
+            if this_bucket_ref.key.borrow() != key {
+                continue;
+            }
+
+            let mut new_bucket_ptr = maybe_new_bucket_ptr.unwrap_or_else(|| {
+                Owned::new(Bucket {
+                    key: this_bucket_ref.key.clone(),
+                    maybe_value: None,
+                })
+            });
+
+            loop {
+                if this_bucket_ptr.tag().has_redirect() {
+                    // consume load from this_bucket isn't strong enough to publish
+                    // writes to *self.next_array
+                    let next_array_ptr = self.next_array.load_consume(guard);
+                    assert!(!next_array_ptr.is_null());
+                    let next_array = unsafe { next_array_ptr.deref() };
+                    self.grow_into(next_array, guard);
+
+                    return next_array.modify(key, hash, modifier, Some(new_bucket_ptr), guard);
+                }
+
+                let old_value = match this_bucket_ref.maybe_value.as_ref() {
+                    Some(v) => v,
+                    None => return (Shared::null(), self_ptr),
+                };
+
+                new_bucket_ptr.maybe_value = Some(modifier(old_value));
+
+                // strong CAS here because i guessed it is more expensive to
+                // invoke modifier again than it is to strong CAS
+                match this_bucket.compare_and_set(
+                    this_bucket_ptr,
+                    new_bucket_ptr,
+                    (Ordering::AcqRel, Ordering::Acquire),
+                    guard,
+                ) {
+                    Ok(_) => return (this_bucket_ptr, self_ptr),
+                    Err(e) => {
+                        new_bucket_ptr = e.new;
+                        this_bucket_ptr = e.current;
+                    }
+                }
+
+                // we'll never replace a non-null pointer with a null pointer
+                // so this should never fail
+                this_bucket_ref = unsafe { this_bucket_ptr.as_ref().unwrap() };
+            }
+        }
+
+        (Shared::null(), self_ptr)
     }
 
     fn grow(&self, guard: &'g Guard) -> Shared<'g, BucketArray<K, V, S>> {

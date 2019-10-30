@@ -41,7 +41,7 @@ mod tests {
 
     use std::{
         sync::{Arc, Barrier},
-        thread,
+        thread::{self, JoinHandle},
     };
 
     #[test]
@@ -332,6 +332,52 @@ mod tests {
 
         for i in INSERTED_MIDPOINT..MAX_INSERTED_VALUE {
             assert_eq!(map.get(&i), None);
+        }
+    }
+
+    #[test]
+    fn hash_map_modify() {
+        let map = HashMap::new();
+
+        assert_eq!(map.modify("foo", |x| x * 2), None);
+
+        map.insert("foo", 1);
+        assert_eq!(map.modify("foo", |x| x * 2), Some(1));
+
+        map.remove("foo");
+        assert_eq!(map.modify("foo", |x| x * 2), None);
+    }
+
+    #[test]
+    fn hash_map_concurrent_modification() {
+        const MAX_VALUE: i64 = 512;
+        const NUM_THREADS: usize = 64;
+        const MAX_INSERTED_VALUE: i64 = (NUM_THREADS as i64) * MAX_VALUE;
+
+        let map = Arc::new(HashMap::new());
+
+        for i in 0..MAX_INSERTED_VALUE {
+            map.insert(i, i);
+        }
+
+        let threads: Vec<_> = (0..NUM_THREADS)
+            .map(|i| {
+                let map = map.clone();
+
+                thread::spawn(move || {
+                    for j in (i as i64 * MAX_VALUE)..((i as i64 + 1) * MAX_VALUE) {
+                        assert_eq!(map.modify(&j, |x| x * 2), Some(j));
+                    }
+                })
+            })
+            .collect();
+
+        for result in threads.into_iter().map(JoinHandle::join) {
+            assert!(result.is_ok());
+        }
+
+        for i in 0..MAX_INSERTED_VALUE {
+            assert_eq!(map.get(&i), Some(i * 2));
         }
     }
 }
