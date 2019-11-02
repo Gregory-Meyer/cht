@@ -380,4 +380,75 @@ mod tests {
             assert_eq!(map.get(&i), Some(i * 2));
         }
     }
+
+    #[test]
+    fn hash_map_insert_or_modify() {
+        let map = HashMap::new();
+
+        assert_eq!(map.insert_or_modify("foo", 1, |x| x + 1), None);
+        assert_eq!(map.get("foo"), Some(1));
+
+        assert_eq!(map.insert_or_modify("foo", 1, |x| x + 1), Some(1));
+        assert_eq!(map.get("foo"), Some(2));
+    }
+
+    #[test]
+    fn hash_map_concurrent_insert_or_modify() {
+        const NUM_THREADS: usize = 64;
+        const MAX_VALUE: i32 = 512;
+
+        let map = Arc::new(HashMap::new());
+
+        let threads: Vec<_> = (0..NUM_THREADS)
+            .map(|_| {
+                let map = map.clone();
+
+                thread::spawn(move || {
+                    for j in 0..MAX_VALUE {
+                        map.insert_or_modify(j, 1, |x| x + 1);
+                    }
+                })
+            })
+            .collect();
+
+        for result in threads.into_iter().map(JoinHandle::join) {
+            assert!(result.is_ok());
+        }
+
+        assert_eq!(map.len(), MAX_VALUE as usize);
+
+        for i in 0..MAX_VALUE {
+            assert_eq!(map.get(&i), Some(NUM_THREADS as i32));
+        }
+    }
+
+    #[test]
+    fn hash_map_concurrent_insert_overlapped() {
+        const NUM_THREADS: usize = 64;
+        const MAX_VALUE: i32 = 512;
+
+        let map = Arc::new(HashMap::new());
+
+        let threads: Vec<_> = (0..NUM_THREADS)
+            .map(|_| {
+                let map = map.clone();
+
+                thread::spawn(move || {
+                    for j in 0..MAX_VALUE {
+                        map.insert(j, j);
+                    }
+                })
+            })
+            .collect();
+
+        for result in threads.into_iter().map(JoinHandle::join) {
+            assert!(result.is_ok());
+        }
+
+        assert_eq!(map.len(), MAX_VALUE as usize);
+
+        for i in 0..MAX_VALUE {
+            assert_eq!(map.get(&i), Some(i));
+        }
+    }
 }

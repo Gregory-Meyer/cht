@@ -36,7 +36,7 @@ use std::{
 };
 
 use ahash::ABuildHasher;
-use crossbeam_epoch::{self, Atomic, Guard, Owned, Pointer, Shared};
+use crossbeam_epoch::{self, Atomic, Guard, Owned, Shared};
 
 /// Default hasher for `HashMap`.
 ///
@@ -138,7 +138,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         } else {
             HashMap {
                 buckets: Atomic::new(BucketArray::with_capacity_hasher_and_epoch(
-                    capacity,
+                    capacity + 1,
                     hash_builder.clone(),
                     0,
                 )),
@@ -458,7 +458,43 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         on_modify: G,
         with_old_value: H,
     ) -> Option<T> {
-        unimplemented!()
+        let guard = &crossbeam_epoch::pin();
+
+        let hash = self.get_hash(&key);
+
+        let buckets_ptr = self.get_or_create_buckets(guard);
+        assert!(!buckets_ptr.is_null());
+
+        let buckets = unsafe { buckets_ptr.deref() };
+
+        let BucketAndParent {
+            bucket: previous_bucket_ptr,
+            parent: new_buckets_ptr,
+        } = buckets.insert_or_modify(
+            KeyOrBucket::Key(key),
+            hash,
+            FunctionOrValue::Function(on_insert),
+            on_modify,
+            guard,
+        );
+
+        if new_buckets_ptr != buckets_ptr {
+            self.swing_bucket_array_ptr(buckets_ptr, new_buckets_ptr, guard);
+        }
+
+        if !previous_bucket_ptr.is_null() {
+            unsafe {
+                guard.defer_unchecked(move || {
+                    atomic::fence(Ordering::Acquire);
+                    mem::drop(previous_bucket_ptr.into_owned());
+                })
+            };
+        } else {
+            self.len.fetch_add(1, Ordering::Relaxed);
+        }
+
+        unsafe { previous_bucket_ptr.as_ref() }
+            .and_then(move |b| b.maybe_value.as_ref().map(with_old_value))
     }
 }
 
@@ -1228,6 +1264,108 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
         (Shared::null(), self_ptr)
     }
 
+    fn insert_or_modify<G: FnOnce() -> V, F: FnMut(&V) -> V>(
+        &self,
+        mut key_or_bucket: KeyOrBucket<K, V>,
+        hash: u64,
+        mut inserter: FunctionOrValue<G, V>,
+        mut modifier: F,
+        guard: &'g Guard,
+    ) -> BucketAndParent<'g, K, V, S> {
+        let self_shared = (self as *const BucketArray<K, V, S>).into();
+
+        let capacity = self.buckets.len();
+        let len = self.len.load(Ordering::Relaxed);
+
+        let insert_into_next = |key_or_bucket, inserter, modifier| {
+            let next_array_ptr = self.next_array.load_consume(guard);
+            assert!(!next_array_ptr.is_null());
+            let next_array = unsafe { next_array_ptr.deref() };
+            self.grow_into(next_array, guard);
+
+            next_array.insert_or_modify(key_or_bucket, hash, inserter, modifier, guard)
+        };
+
+        // grow if inserting would push us over a load factor of 0.5
+        if (len + 1) > (capacity / 2) {
+            self.grow(guard);
+
+            return insert_into_next(key_or_bucket, inserter, modifier);
+        }
+
+        let offset = (hash & (capacity - 1) as u64) as usize;
+
+        for this_bucket in (0..capacity)
+            .map(|x| (x + offset) & (capacity - 1))
+            .map(|i| &self.buckets[i])
+        {
+            let mut this_bucket_ptr = this_bucket.load_consume(guard);
+
+            // if the bucket pointer is non-null and its key does not match, move to the next bucket
+            if !this_bucket_ptr.tag().has_redirect()
+                && unsafe { this_bucket_ptr.as_ref() }
+                    .map(|this_bucket_ref| &this_bucket_ref.key != key_or_bucket.as_key())
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+
+            loop {
+                if this_bucket_ptr.tag().has_redirect() {
+                    return insert_into_next(key_or_bucket, inserter, modifier);
+                }
+
+                let new_value = unsafe { this_bucket_ptr.as_ref() }
+                    .and_then(|this_bucket_ref| this_bucket_ref.maybe_value.as_ref())
+                    .map(&mut modifier)
+                    .unwrap_or_else(|| inserter.into_value());
+                let new_bucket_ptr = key_or_bucket.into_bucket_with_value(new_value);
+
+                // strong CAS to avoid spurious re-invocations of the modifier
+                match this_bucket.compare_and_set(
+                    this_bucket_ptr,
+                    new_bucket_ptr,
+                    (Ordering::AcqRel, Ordering::Acquire),
+                    guard,
+                ) {
+                    Ok(_) => {
+                        if this_bucket_ptr.is_null() {
+                            self.len.fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        return BucketAndParent {
+                            bucket: this_bucket_ptr,
+                            parent: self_shared,
+                        };
+                    }
+                    Err(mut e) => {
+                        inserter = FunctionOrValue::Value(e.new.maybe_value.take().unwrap());
+                        key_or_bucket = KeyOrBucket::Bucket(e.new);
+
+                        // if another thread inserted into this bucket, check to see if its key
+                        // matches the one we are trying to insert/modify
+                        if this_bucket_ptr.is_null()
+                            && !e.current.tag().has_redirect()
+                            && unsafe { e.current.as_ref() }
+                                .map(|this_bucket_ref| {
+                                    &this_bucket_ref.key != key_or_bucket.as_key()
+                                })
+                                .unwrap_or(false)
+                        {
+                            continue;
+                        }
+
+                        this_bucket_ptr = e.current;
+                    }
+                }
+            }
+        }
+
+        self.grow(guard);
+
+        insert_into_next(key_or_bucket, inserter, modifier)
+    }
+
     fn grow(&self, guard: &'g Guard) -> Shared<'g, BucketArray<K, V, S>> {
         let maybe_next_array_ptr = self.next_array.load_consume(guard);
 
@@ -1262,10 +1400,6 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
 
     fn grow_into(&self, next_array: &'g BucketArray<K, V, S>, guard: &'g Guard) {
         'outer: for this_bucket in self.buckets.iter() {
-            if self.is_supplanted.load(Ordering::Relaxed) {
-                return;
-            }
-
             let mut this_bucket_ptr = this_bucket.load_consume(guard);
 
             if this_bucket_ptr.tag().has_redirect() {
@@ -1276,13 +1410,9 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                 Some(b) => b,
                 None => {
                     loop {
-                        if self.is_supplanted.load(Ordering::Relaxed) {
-                            return;
-                        }
-
                         match this_bucket.compare_and_set_weak(
-                            Shared::null(),
-                            Shared::null().with_tag(this_bucket_ptr.tag().with_redirect()),
+                            this_bucket_ptr,
+                            this_bucket_ptr.with_tag(this_bucket_ptr.tag().with_redirect()),
                             (Ordering::AcqRel, Ordering::Acquire),
                             guard,
                         ) {
@@ -1305,16 +1435,16 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                 }
             };
 
-            loop {
-                if self.is_supplanted.load(Ordering::Relaxed) {
-                    return;
-                }
+            // if we insert a bucket that is then tombstone-d, we need to
+            // insert a second time to remove that tombtsone
+            let mut was_inserted = false;
 
+            loop {
                 if this_bucket_ptr.tag().has_redirect() {
                     break;
                 }
 
-                if this_bucket_ref.is_tombstone() {
+                if !was_inserted && this_bucket_ref.is_tombstone() {
                     match this_bucket.compare_and_set_weak(
                         this_bucket_ptr,
                         this_bucket_ptr.with_tag(this_bucket_ptr.tag().with_redirect()),
@@ -1337,6 +1467,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                 let hash = self.get_hash(this_key);
 
                 next_array.insert(this_bucket_ptr, hash, guard);
+                was_inserted = true;
 
                 // strong CAS to avoid spurious insert/remove pairs
                 match this_bucket.compare_and_set(
@@ -1354,13 +1485,16 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                 }
             }
         }
-
-        self.is_supplanted.store(true, Ordering::Relaxed);
     }
 
     fn get_next(&self, guard: &'g Guard) -> Option<&'g BucketArray<K, V, S>> {
         unsafe { self.next_array.load_consume(guard).as_ref() }
     }
+}
+
+struct BucketAndParent<'a, K: Hash + Eq, V, S: BuildHasher> {
+    bucket: Shared<'a, Bucket<K, V>>,
+    parent: Shared<'a, BucketArray<K, V, S>>,
 }
 
 #[repr(align(2))]
@@ -1369,12 +1503,12 @@ struct Bucket<K: Hash + Eq, V> {
     maybe_value: Option<V>,
 }
 
-enum FunctionOrValue<T, F: FnOnce() -> T> {
+enum FunctionOrValue<F: FnOnce() -> T, T> {
     Function(F),
     Value(T),
 }
 
-impl<T, F: FnOnce() -> T> FunctionOrValue<T, F> {
+impl<F: FnOnce() -> T, T> FunctionOrValue<F, T> {
     fn into_value(self) -> T {
         match self {
             FunctionOrValue::Function(f) => f(),
@@ -1386,5 +1520,33 @@ impl<T, F: FnOnce() -> T> FunctionOrValue<T, F> {
 impl<K: Hash + Eq, V> Bucket<K, V> {
     fn is_tombstone(&self) -> bool {
         self.maybe_value.is_none()
+    }
+}
+
+enum KeyOrBucket<K: Hash + Eq, V> {
+    Key(K),
+    Bucket(Owned<Bucket<K, V>>),
+}
+
+impl<K: Hash + Eq, V> KeyOrBucket<K, V> {
+    fn into_bucket_with_value(self, value: V) -> Owned<Bucket<K, V>> {
+        match self {
+            KeyOrBucket::Key(key) => Owned::new(Bucket {
+                key,
+                maybe_value: Some(value),
+            }),
+            KeyOrBucket::Bucket(mut bucket_ptr) => {
+                bucket_ptr.maybe_value = Some(value);
+
+                bucket_ptr
+            }
+        }
+    }
+
+    fn as_key(&self) -> &K {
+        match self {
+            KeyOrBucket::Key(key) => &key,
+            KeyOrBucket::Bucket(bucket) => &bucket.key,
+        }
     }
 }
