@@ -53,9 +53,16 @@ mod tests {
         for i in 0..MAX_VALUE {
             assert_eq!(map.insert(i, i), None);
 
-            for j in 0..i {
+            assert!(!map.is_empty());
+            assert_eq!(map.len(), (i + 1) as usize);
+
+            for j in 0..=i {
                 assert_eq!(map.get(&j), Some(j));
                 assert_eq!(map.insert(j, j), Some(j));
+            }
+
+            for k in i + 1..MAX_VALUE {
+                assert_eq!(map.get(&k), None);
             }
         }
     }
@@ -64,14 +71,21 @@ mod tests {
     fn hash_map_growth() {
         const MAX_VALUE: i32 = 512;
 
-        let map = HashMap::with_capacity(1);
+        let map = HashMap::new();
 
         for i in 0..MAX_VALUE {
             assert_eq!(map.insert(i, i), None);
 
-            for j in 0..i {
+            assert!(!map.is_empty());
+            assert_eq!(map.len(), (i + 1) as usize);
+
+            for j in 0..=i {
                 assert_eq!(map.get(&j), Some(j));
                 assert_eq!(map.insert(j, j), Some(j));
+            }
+
+            for k in i + 1..MAX_VALUE {
+                assert_eq!(map.get(&k), None);
             }
         }
     }
@@ -100,10 +114,11 @@ mod tests {
             })
             .collect();
 
-        for result in threads.into_iter().map(|t| t.join()) {
+        for result in threads.into_iter().map(JoinHandle::join) {
             assert!(result.is_ok());
         }
 
+        assert!(!map.is_empty());
         assert_eq!(map.len(), MAX_INSERTED_VALUE as usize);
 
         for i in 0..MAX_INSERTED_VALUE {
@@ -117,7 +132,7 @@ mod tests {
         const NUM_THREADS: usize = 64;
         const MAX_INSERTED_VALUE: i32 = (NUM_THREADS as i32) * MAX_VALUE;
 
-        let map = Arc::new(HashMap::with_capacity(1));
+        let map = Arc::new(HashMap::new());
         let barrier = Arc::new(Barrier::new(NUM_THREADS));
 
         let threads: Vec<_> = (0..NUM_THREADS)
@@ -139,6 +154,7 @@ mod tests {
             assert!(result.is_ok());
         }
 
+        assert!(!map.is_empty());
         assert_eq!(map.len(), MAX_INSERTED_VALUE as usize);
 
         for i in 0..MAX_INSERTED_VALUE {
@@ -150,7 +166,7 @@ mod tests {
     fn hash_map_removal() {
         const MAX_VALUE: i32 = 512;
 
-        let map = HashMap::with_capacity(1);
+        let map = HashMap::with_capacity(MAX_VALUE as usize);
 
         for i in 0..MAX_VALUE {
             assert_eq!(map.insert(i, i), None);
@@ -159,6 +175,9 @@ mod tests {
         for i in 0..MAX_VALUE {
             assert_eq!(map.remove(&i), Some(i));
         }
+
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
 
         for i in 0..MAX_VALUE {
             assert_eq!(map.get(&i), None);
@@ -171,12 +190,13 @@ mod tests {
         const NUM_THREADS: usize = 64;
         const MAX_INSERTED_VALUE: i32 = (NUM_THREADS as i32) * MAX_VALUE;
 
-        let map = Arc::new(HashMap::with_capacity(1));
+        let map = HashMap::with_capacity(MAX_INSERTED_VALUE as usize);
 
         for i in 0..MAX_INSERTED_VALUE {
             assert_eq!(map.insert(i, i), None);
         }
 
+        let map = Arc::new(map);
         let barrier = Arc::new(Barrier::new(NUM_THREADS));
 
         let threads: Vec<_> = (0..NUM_THREADS)
@@ -212,12 +232,13 @@ mod tests {
         const MAX_INSERTED_VALUE: i32 = (NUM_THREADS as i32) * MAX_VALUE * 2;
         const INSERTED_MIDPOINT: i32 = MAX_INSERTED_VALUE / 2;
 
-        let map = Arc::new(HashMap::with_capacity(MAX_INSERTED_VALUE as usize));
+        let map = HashMap::with_capacity(MAX_INSERTED_VALUE as usize);
 
         for i in INSERTED_MIDPOINT..MAX_INSERTED_VALUE {
             assert_eq!(map.insert(i, i), None);
         }
 
+        let map = Arc::new(map);
         let barrier = Arc::new(Barrier::new(NUM_THREADS * 2));
 
         let insert_threads: Vec<_> = (0..NUM_THREADS)
@@ -259,6 +280,7 @@ mod tests {
             assert!(result.is_ok());
         }
 
+        assert!(!map.is_empty());
         assert_eq!(map.len(), INSERTED_MIDPOINT as usize);
 
         for i in 0..INSERTED_MIDPOINT {
@@ -277,12 +299,13 @@ mod tests {
         const MAX_INSERTED_VALUE: i32 = (NUM_THREADS as i32) * MAX_VALUE * 2;
         const INSERTED_MIDPOINT: i32 = MAX_INSERTED_VALUE / 2;
 
-        let map = Arc::new(HashMap::with_capacity(1));
+        let map = HashMap::with_capacity(INSERTED_MIDPOINT as usize);
 
         for i in INSERTED_MIDPOINT..MAX_INSERTED_VALUE {
             assert_eq!(map.insert(i, i), None);
         }
 
+        let map = Arc::new(map);
         let barrier = Arc::new(Barrier::new(NUM_THREADS * 2));
 
         let insert_threads: Vec<_> = (0..NUM_THREADS)
@@ -319,11 +342,12 @@ mod tests {
         for result in insert_threads
             .into_iter()
             .chain(remove_threads.into_iter())
-            .map(|t| t.join())
+            .map(JoinHandle::join)
         {
             assert!(result.is_ok());
         }
 
+        assert!(!map.is_empty());
         assert_eq!(map.len(), INSERTED_MIDPOINT as usize);
 
         for i in 0..INSERTED_MIDPOINT {
@@ -339,33 +363,51 @@ mod tests {
     fn hash_map_modify() {
         let map = HashMap::new();
 
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
         assert_eq!(map.modify("foo", |x| x * 2), None);
+
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
 
         map.insert("foo", 1);
         assert_eq!(map.modify("foo", |x| x * 2), Some(1));
 
+        assert!(!map.is_empty());
+        assert_eq!(map.len(), 1);
+
         map.remove("foo");
         assert_eq!(map.modify("foo", |x| x * 2), None);
+
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
     }
 
     #[test]
     fn hash_map_concurrent_modification() {
-        const MAX_VALUE: i64 = 512;
+        const MAX_VALUE: i32 = 512;
         const NUM_THREADS: usize = 64;
-        const MAX_INSERTED_VALUE: i64 = (NUM_THREADS as i64) * MAX_VALUE;
+        const MAX_INSERTED_VALUE: i32 = (NUM_THREADS as i32) * MAX_VALUE;
 
-        let map = Arc::new(HashMap::new());
+        let map = HashMap::with_capacity(MAX_INSERTED_VALUE as usize);
 
         for i in 0..MAX_INSERTED_VALUE {
             map.insert(i, i);
         }
 
+        let map = Arc::new(map);
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
+
         let threads: Vec<_> = (0..NUM_THREADS)
             .map(|i| {
                 let map = map.clone();
+                let barrier = barrier.clone();
 
                 thread::spawn(move || {
-                    for j in (i as i64 * MAX_VALUE)..((i as i64 + 1) * MAX_VALUE) {
+                    barrier.wait();
+
+                    for j in (i as i32 * MAX_VALUE)..((i as i32 + 1) * MAX_VALUE) {
                         assert_eq!(map.modify(&j, |x| x * 2), Some(j));
                     }
                 })
@@ -376,8 +418,52 @@ mod tests {
             assert!(result.is_ok());
         }
 
+        assert!(!map.is_empty());
+        assert_eq!(map.len(), MAX_INSERTED_VALUE as usize);
+
         for i in 0..MAX_INSERTED_VALUE {
             assert_eq!(map.get(&i), Some(i * 2));
+        }
+    }
+
+    #[test]
+    fn hash_map_concurrent_overlapped_modification() {
+        const MAX_VALUE: i32 = 512;
+        const NUM_THREADS: usize = 64;
+
+        let map = HashMap::with_capacity(MAX_VALUE as usize);
+
+        for i in 0..MAX_VALUE {
+            assert_eq!(map.insert(i, 0), None);
+        }
+
+        let map = Arc::new(map);
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
+
+        let threads: Vec<_> = (0..NUM_THREADS)
+            .map(|_| {
+                let map = map.clone();
+                let barrier = barrier.clone();
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    for i in 0..MAX_VALUE {
+                        assert!(map.modify(&i, |x| x + 1).is_some());
+                    }
+                })
+            })
+            .collect();
+
+        for result in threads.into_iter().map(JoinHandle::join) {
+            assert!(result.is_ok());
+        }
+
+        assert!(!map.is_empty());
+        assert_eq!(map.len(), MAX_VALUE as usize);
+
+        for i in 0..MAX_VALUE {
+            assert_eq!(map.get(&i), Some(NUM_THREADS as i32));
         }
     }
 
@@ -398,12 +484,16 @@ mod tests {
         const MAX_VALUE: i32 = 512;
 
         let map = Arc::new(HashMap::new());
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
 
         let threads: Vec<_> = (0..NUM_THREADS)
             .map(|_| {
                 let map = map.clone();
+                let barrier = barrier.clone();
 
                 thread::spawn(move || {
+                    barrier.wait();
+
                     for j in 0..MAX_VALUE {
                         map.insert_or_modify(j, 1, |x| x + 1);
                     }
@@ -423,17 +513,21 @@ mod tests {
     }
 
     #[test]
-    fn hash_map_concurrent_insert_overlapped() {
+    fn hash_map_concurrent_overlapped_insertion() {
         const NUM_THREADS: usize = 64;
         const MAX_VALUE: i32 = 512;
 
-        let map = Arc::new(HashMap::new());
+        let map = Arc::new(HashMap::with_capacity(MAX_VALUE as usize));
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
 
         let threads: Vec<_> = (0..NUM_THREADS)
             .map(|_| {
                 let map = map.clone();
+                let barrier = barrier.clone();
 
                 thread::spawn(move || {
+                    barrier.wait();
+
                     for j in 0..MAX_VALUE {
                         map.insert(j, j);
                     }
@@ -449,6 +543,85 @@ mod tests {
 
         for i in 0..MAX_VALUE {
             assert_eq!(map.get(&i), Some(i));
+        }
+    }
+
+    #[test]
+    fn hash_map_concurrent_overlapped_growth() {
+        const NUM_THREADS: usize = 64;
+        const MAX_VALUE: i32 = 512;
+
+        let map = Arc::new(HashMap::new());
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
+
+        let threads: Vec<_> = (0..NUM_THREADS)
+            .map(|_| {
+                let map = map.clone();
+                let barrier = barrier.clone();
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    for j in 0..MAX_VALUE {
+                        map.insert(j, j);
+                    }
+                })
+            })
+            .collect();
+
+        for result in threads.into_iter().map(JoinHandle::join) {
+            assert!(result.is_ok());
+        }
+
+        assert_eq!(map.len(), MAX_VALUE as usize);
+
+        for i in 0..MAX_VALUE {
+            assert_eq!(map.get(&i), Some(i));
+        }
+    }
+
+    #[test]
+    fn hash_map_concurrent_overlapped_removal() {
+        const NUM_THREADS: usize = 64;
+        const MAX_VALUE: i32 = 512;
+
+        let map = HashMap::with_capacity(MAX_VALUE as usize);
+
+        for i in 0..MAX_VALUE {
+            map.insert(i, i);
+        }
+
+        let map = Arc::new(map);
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
+
+        let threads: Vec<_> = (0..NUM_THREADS)
+            .map(|_| {
+                let map = map.clone();
+                let barrier = barrier.clone();
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    for j in 0..MAX_VALUE {
+                        let prev_value = map.remove(&j);
+
+                        if let Some(v) = prev_value {
+                            assert_eq!(v, j);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for result in threads.into_iter().map(JoinHandle::join) {
+            assert!(result.is_ok());
+        }
+
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        for i in 0..MAX_VALUE {
+            assert_eq!(map.get(&i), None);
         }
     }
 }

@@ -680,7 +680,13 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
             self.swing_bucket_array_ptr(buckets_ptr, new_buckets_ptr, guard);
         }
 
-        unsafe { found_bucket_ptr.as_ref() }
+        if let Some(found_bucket) = unsafe { found_bucket_ptr.as_ref() } {
+            assert!(found_bucket.key.borrow() == key);
+
+            Some(found_bucket)
+        } else {
+            None
+        }
     }
 
     fn do_insert(&self, key: K, value: V, guard: &'g Guard) -> Option<&'g Bucket<K, V>> {
@@ -698,11 +704,11 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
 
         let (previous_bucket_ptr, new_buckets_ptr) = buckets.insert(new_bucket, hash, guard);
 
-        if let Some(previous_bucket) = unsafe { previous_bucket_ptr.as_ref() } {
-            if previous_bucket.maybe_value.is_none() {
-                self.len.fetch_add(1, Ordering::Relaxed);
-            }
-        } else {
+        // increment length if we replaced a null or tombstone bucket
+        if unsafe { previous_bucket_ptr.as_ref() }
+            .map(|b| b.maybe_value.is_none())
+            .unwrap_or(true)
+        {
             self.len.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -823,13 +829,13 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
                 match self.buckets.compare_and_set_weak(
                     Shared::null(),
                     new_buckets,
-                    (Ordering::AcqRel, Ordering::Acquire),
+                    (Ordering::Release, Ordering::Relaxed),
                     guard,
                 ) {
                     Ok(new_buckets) => return new_buckets,
                     Err(e) => {
                         maybe_new_buckets = Some(e.new);
-                        buckets_ptr = e.current;
+                        buckets_ptr = self.buckets.load_consume(guard);
                     }
                 }
             } else {
@@ -857,7 +863,7 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
             match self.buckets.compare_and_set(
                 current_ptr,
                 next_ptr,
-                (Ordering::AcqRel, Ordering::Acquire),
+                (Ordering::Release, Ordering::Relaxed),
                 guard,
             ) {
                 Ok(_) => {
@@ -870,7 +876,7 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
 
                     current_ptr = next_ptr;
                 }
-                Err(e) => current_ptr = e.current,
+                Err(_) => current_ptr = self.buckets.load_consume(guard),
             }
 
             current = unsafe { current_ptr.deref() };
@@ -880,26 +886,16 @@ impl<'g, K: Hash + Eq, V, S: 'g + BuildHasher> HashMap<K, V, S> {
 
 impl<K: Eq + Hash, V, S: BuildHasher> Drop for HashMap<K, V, S> {
     fn drop(&mut self) {
-        // ensure all loads have the most recent data available
-        atomic::fence(Ordering::Acquire);
-
-        // all opeations can have relaxed memory ordering, since drop is called
-        // with a mutable reference, forbidding any other thread from even
-        // holding a reference to the map
-
         let guard = unsafe { crossbeam_epoch::unprotected() };
 
-        let mut buckets_ptr = self.buckets.swap(Shared::null(), Ordering::Relaxed, guard);
+        let mut buckets_ptr = self.buckets.load_consume(guard);
 
         while !buckets_ptr.is_null() {
             let this_bucket_array = unsafe { buckets_ptr.deref() };
-            let new_buckets_ptr =
-                this_bucket_array
-                    .next_array
-                    .swap(Shared::null(), Ordering::Relaxed, guard);
+            let new_buckets_ptr = this_bucket_array.next_array.load_consume(guard);
 
             for this_bucket in this_bucket_array.buckets.iter() {
-                let this_bucket_ptr = this_bucket.swap(Shared::null(), Ordering::Relaxed, guard);
+                let this_bucket_ptr = this_bucket.load_consume(guard);
 
                 if this_bucket_ptr.is_null() || this_bucket_ptr.tag().has_redirect() {
                     continue;
@@ -920,7 +916,6 @@ struct BucketArray<K: Hash + Eq, V, S: BuildHasher> {
     next_array: Atomic<BucketArray<K, V, S>>,
     hash_builder: Arc<S>,
     epoch: u64,
-    is_supplanted: AtomicBool,
 }
 
 impl<K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
@@ -935,7 +930,6 @@ impl<K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
             next_array: Atomic::null(),
             hash_builder,
             epoch,
-            is_supplanted: AtomicBool::new(false),
         }
     }
 
@@ -1027,31 +1021,20 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
         let capacity = self.buckets.len();
         let len = self.len.load(Ordering::Relaxed);
 
-        let insert_into = |next_array_ptr: Shared<'_, BucketArray<K, V, S>>| {
-            assert!(!next_array_ptr.is_null());
-            let next_array = unsafe { next_array_ptr.deref() };
-
-            next_array.insert(bucket_ptr, hash, guard)
-        };
-
         // grow if inserting would push us over a load factor of 0.5
         if (len + 1) > (capacity / 2) {
-            return insert_into(self.grow(guard));
+            let next_array = self.grow(guard);
+
+            return next_array.insert(bucket_ptr, hash, guard);
         }
 
-        let grow_into_next_if_and_insert_into_next = |have_seen_redirect| {
-            let next_array_ptr = if have_seen_redirect {
-                let next_array_ptr = self.next_array.load_consume(guard);
-                assert!(!next_array_ptr.is_null());
-                let next_array = unsafe { next_array_ptr.deref() };
-                self.grow_into(next_array, guard);
+        let grow_into_and_insert_into_next = || {
+            let next_array_ptr = self.next_array.load_consume(guard);
+            assert!(!next_array_ptr.is_null());
+            let next_array = unsafe { next_array_ptr.deref() };
+            // self.grow_into(next_array, guard);
 
-                next_array_ptr
-            } else {
-                self.grow(guard)
-            };
-
-            insert_into(next_array_ptr)
+            next_array.insert(bucket_ptr, hash, guard)
         };
 
         let offset = (hash & (capacity - 1) as u64) as usize;
@@ -1061,10 +1044,9 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
             .map(|x| (x + offset) & (capacity - 1))
             .map(|i| &self.buckets[i])
         {
-            // to ensure the store to the key is visible in this thread
-            let mut this_bucket_ptr = this_bucket.load_consume(guard);
-
             loop {
+                let this_bucket_ptr = this_bucket.load_consume(guard);
+
                 have_seen_redirect = have_seen_redirect || this_bucket_ptr.tag().has_redirect();
 
                 let should_increment_len =
@@ -1079,32 +1061,38 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                     };
 
                 if this_bucket_ptr.tag().has_redirect() {
-                    return grow_into_next_if_and_insert_into_next(true);
+                    return grow_into_and_insert_into_next();
                 }
 
-                match this_bucket.compare_and_set_weak(
-                    this_bucket_ptr,
-                    bucket_ptr,
-                    (Ordering::AcqRel, Ordering::Acquire),
-                    guard,
-                ) {
-                    Ok(_) => {
-                        if should_increment_len {
-                            // replaced a tombstone
-                            self.len.fetch_add(1, Ordering::Relaxed);
-                        }
-
-                        return (
-                            this_bucket_ptr,
-                            (self as *const BucketArray<K, V, S>).into(),
-                        );
+                if this_bucket
+                    .compare_and_set_weak(
+                        this_bucket_ptr,
+                        bucket_ptr,
+                        (Ordering::Release, Ordering::Relaxed),
+                        guard,
+                    )
+                    .is_ok()
+                {
+                    if should_increment_len {
+                        // replaced a tombstone
+                        self.len.fetch_add(1, Ordering::Relaxed);
                     }
-                    Err(e) => this_bucket_ptr = e.current,
+
+                    return (
+                        this_bucket_ptr,
+                        (self as *const BucketArray<K, V, S>).into(),
+                    );
                 }
             }
         }
 
-        grow_into_next_if_and_insert_into_next(have_seen_redirect)
+        if have_seen_redirect {
+            grow_into_and_insert_into_next()
+        } else {
+            let next_array = self.grow(guard);
+
+            next_array.insert(bucket_ptr, hash, guard)
+        }
     }
 
     fn remove<Q: Hash + Eq + ?Sized>(
@@ -1117,7 +1105,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
     where
         K: Clone + Borrow<Q>,
     {
-        let self_ptr = (self as *const BucketArray<K, V, S>).into();
+        let self_shared = (self as *const BucketArray<K, V, S>).into();
 
         let capacity = self.buckets.len();
         let offset = (hash & (capacity - 1) as u64) as usize;
@@ -1128,19 +1116,30 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
         {
             let mut this_bucket_ptr = this_bucket.load_consume(guard);
 
-            loop {
-                if this_bucket_ptr.is_null() {
-                    return (Shared::null(), self_ptr);
-                }
-
-                let this_bucket_ref = unsafe { this_bucket_ptr.deref() };
-
+            if let Some(this_bucket_ref) = unsafe { this_bucket_ptr.as_ref() } {
                 if this_bucket_ref.key.borrow() != key {
-                    // hash collision, keep probing
-                    break;
-                } else if this_bucket_ref.is_tombstone() {
-                    return (Shared::null(), self_ptr);
+                    // hash collision
+                    continue;
                 }
+            }
+
+            loop {
+                if this_bucket_ptr.tag().has_redirect() {
+                    let next_array = unsafe { self.get_next_unchecked(guard) };
+
+                    return next_array.remove(key, hash, maybe_new_bucket, guard);
+                }
+
+                let this_bucket_ref =
+                    if let Some(this_bucket_ref) = unsafe { this_bucket_ptr.as_ref() } {
+                        if this_bucket_ref.is_tombstone() {
+                            return (Shared::null(), self_shared);
+                        }
+
+                        this_bucket_ref
+                    } else {
+                        return (Shared::null(), self_shared);
+                    };
 
                 let new_bucket = match maybe_new_bucket.take() {
                     Some(b) => b,
@@ -1150,35 +1149,38 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                     }),
                 };
 
-                if this_bucket_ptr.tag().has_redirect() {
-                    let next_array = self.get_next(guard).unwrap();
-
-                    return next_array.remove(key, hash, Some(new_bucket), guard);
-                }
-
                 match this_bucket.compare_and_set_weak(
                     this_bucket_ptr,
                     new_bucket,
-                    (Ordering::AcqRel, Ordering::Acquire),
+                    (Ordering::Release, Ordering::Relaxed),
                     guard,
                 ) {
                     Ok(_) => {
                         self.len.fetch_sub(1, Ordering::Relaxed);
 
-                        return (
-                            this_bucket_ptr,
-                            (self as *const BucketArray<K, V, S>).into(),
-                        );
+                        return (this_bucket_ptr, self_shared);
                     }
                     Err(e) => {
-                        this_bucket_ptr = e.current;
-                        maybe_new_bucket.replace(e.new);
+                        maybe_new_bucket = Some(e.new);
+                        let current_bucket_ptr = this_bucket.load_consume(guard);
+
+                        // check is only necessary once -- keys never change
+                        // after being inserted/removed
+                        if this_bucket_ptr.is_null()
+                            && unsafe { current_bucket_ptr.as_ref() }
+                                .map(|b| b.key.borrow() != key)
+                                .unwrap_or(false)
+                        {
+                            break;
+                        }
+
+                        this_bucket_ptr = current_bucket_ptr;
                     }
                 }
             }
         }
 
-        (Shared::null(), (self as *const BucketArray<K, V, S>).into())
+        (Shared::null(), self_shared)
     }
 
     fn modify<Q: Hash + Eq + ?Sized, F: FnMut(&V) -> V>(
@@ -1192,7 +1194,7 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
     where
         K: Clone + Borrow<Q>,
     {
-        let self_ptr: Shared<'g, BucketArray<K, V, S>> = (self as *const Self).into();
+        let self_shared: Shared<'g, BucketArray<K, V, S>> = (self as *const Self).into();
 
         let capacity = self.buckets.len();
         let offset = (hash & (self.buckets.len() - 1) as u64) as usize;
@@ -1204,15 +1206,17 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
             let mut this_bucket_ptr = this_bucket.load_consume(guard);
 
             let mut this_bucket_ref = match unsafe { this_bucket_ptr.as_ref() } {
-                Some(b) => b,
-                None => return (Shared::null(), self_ptr),
-            };
+                Some(b) => {
+                    // buckets will never have their key changed, so we only have to
+                    // make this check once
+                    if b.key.borrow() != key {
+                        continue;
+                    }
 
-            // buckets will never have their key changed, so we only have to
-            // make this check once
-            if this_bucket_ref.key.borrow() != key {
-                continue;
-            }
+                    b
+                }
+                None => return (Shared::null(), self_shared),
+            };
 
             let mut new_bucket_ptr = maybe_new_bucket_ptr.unwrap_or_else(|| {
                 Owned::new(Bucket {
@@ -1223,8 +1227,6 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
 
             loop {
                 if this_bucket_ptr.tag().has_redirect() {
-                    // consume load from this_bucket isn't strong enough to publish
-                    // writes to *self.next_array
                     let next_array_ptr = self.next_array.load_consume(guard);
                     assert!(!next_array_ptr.is_null());
                     let next_array = unsafe { next_array_ptr.deref() };
@@ -1235,33 +1237,33 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
 
                 let old_value = match this_bucket_ref.maybe_value.as_ref() {
                     Some(v) => v,
-                    None => return (Shared::null(), self_ptr),
+                    None => return (Shared::null(), self_shared),
                 };
 
                 new_bucket_ptr.maybe_value = Some(modifier(old_value));
 
-                // strong CAS here because i guessed it is more expensive to
-                // invoke modifier again than it is to strong CAS
+                // i assume that a strong CAS is less expensive than invoking
+                // modifier a second time
                 match this_bucket.compare_and_set(
                     this_bucket_ptr,
                     new_bucket_ptr,
-                    (Ordering::AcqRel, Ordering::Acquire),
+                    (Ordering::Release, Ordering::Relaxed),
                     guard,
                 ) {
-                    Ok(_) => return (this_bucket_ptr, self_ptr),
+                    Ok(_) => return (this_bucket_ptr, self_shared),
                     Err(e) => {
                         new_bucket_ptr = e.new;
-                        this_bucket_ptr = e.current;
+
+                        this_bucket_ptr = this_bucket.load_consume(guard);
+                        assert!(!this_bucket_ptr.is_null());
+
+                        this_bucket_ref = unsafe { this_bucket_ptr.deref() };
                     }
                 }
-
-                // we'll never replace a non-null pointer with a null pointer
-                // so this should never fail
-                this_bucket_ref = unsafe { this_bucket_ptr.as_ref().unwrap() };
             }
         }
 
-        (Shared::null(), self_ptr)
+        (Shared::null(), self_shared)
     }
 
     fn insert_or_modify<G: FnOnce() -> V, F: FnMut(&V) -> V>(
@@ -1288,18 +1290,21 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
 
         // grow if inserting would push us over a load factor of 0.5
         if (len + 1) > (capacity / 2) {
-            self.grow(guard);
+            let next_array = self.grow(guard);
 
-            return insert_into_next(key_or_bucket, inserter, modifier);
+            return next_array.insert_or_modify(key_or_bucket, hash, inserter, modifier, guard);
         }
 
         let offset = (hash & (capacity - 1) as u64) as usize;
+        let mut have_seen_redirect = false;
 
         for this_bucket in (0..capacity)
             .map(|x| (x + offset) & (capacity - 1))
             .map(|i| &self.buckets[i])
         {
             let mut this_bucket_ptr = this_bucket.load_consume(guard);
+
+            have_seen_redirect = have_seen_redirect || this_bucket_ptr.tag().has_redirect();
 
             // if the bucket pointer is non-null and its key does not match, move to the next bucket
             if !this_bucket_ptr.tag().has_redirect()
@@ -1321,11 +1326,12 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                     .unwrap_or_else(|| inserter.into_value());
                 let new_bucket_ptr = key_or_bucket.into_bucket_with_value(new_value);
 
-                // strong CAS to avoid spurious re-invocations of the modifier
+                // i assume it is more expensive to invoke modifier than it is
+                // to strong CAS
                 match this_bucket.compare_and_set(
                     this_bucket_ptr,
                     new_bucket_ptr,
-                    (Ordering::AcqRel, Ordering::Acquire),
+                    (Ordering::Release, Ordering::Relaxed),
                     guard,
                 ) {
                     Ok(_) => {
@@ -1342,6 +1348,8 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                         inserter = FunctionOrValue::Value(e.new.maybe_value.take().unwrap());
                         key_or_bucket = KeyOrBucket::Bucket(e.new);
 
+                        have_seen_redirect = have_seen_redirect || e.current.tag().has_redirect();
+
                         // if another thread inserted into this bucket, check to see if its key
                         // matches the one we are trying to insert/modify
                         if this_bucket_ptr.is_null()
@@ -1355,140 +1363,114 @@ impl<'g, K: Hash + Eq, V, S: BuildHasher> BucketArray<K, V, S> {
                             continue;
                         }
 
-                        this_bucket_ptr = e.current;
+                        this_bucket_ptr = this_bucket.load_consume(guard);
                     }
                 }
             }
         }
 
-        self.grow(guard);
+        let next_array = if have_seen_redirect {
+            let next_array_ptr = self.next_array.load_consume(guard);
+            assert!(!next_array_ptr.is_null());
 
-        insert_into_next(key_or_bucket, inserter, modifier)
-    }
-
-    fn grow(&self, guard: &'g Guard) -> Shared<'g, BucketArray<K, V, S>> {
-        let maybe_next_array_ptr = self.next_array.load_consume(guard);
-
-        if !maybe_next_array_ptr.is_null() {
-            let next_array = unsafe { maybe_next_array_ptr.deref() };
+            let next_array = unsafe { next_array_ptr.deref() };
             self.grow_into(next_array, guard);
 
-            return maybe_next_array_ptr;
-        }
-
-        let new_array_ptr = match self.next_array.compare_and_set(
-            maybe_next_array_ptr,
-            Owned::new(BucketArray::with_capacity_hasher_and_epoch(
-                self.buckets.len() * 2,
-                self.hash_builder.clone(),
-                self.epoch + 1,
-            )),
-            (Ordering::AcqRel, Ordering::Acquire),
-            guard,
-        ) {
-            Ok(new_array_ptr) => new_array_ptr,
-            Err(e) => e.current,
+            next_array
+        } else {
+            self.grow(guard)
         };
 
-        assert!(!new_array_ptr.is_null());
-        let new_array = unsafe { new_array_ptr.deref() };
+        next_array.insert_or_modify(key_or_bucket, hash, inserter, modifier, guard)
+    }
 
-        self.grow_into(new_array, guard);
+    fn grow(&self, guard: &'g Guard) -> &'g BucketArray<K, V, S> {
+        let maybe_next_array_ptr = self.next_array.load_consume(guard);
 
-        new_array_ptr
+        if let Some(next_array) = unsafe { maybe_next_array_ptr.as_ref() } {
+            self.grow_into(next_array, guard);
+
+            return next_array;
+        }
+
+        let allocated_array_ptr = Owned::new(BucketArray::with_capacity_hasher_and_epoch(
+            self.buckets.len() * 2,
+            self.hash_builder.clone(),
+            self.epoch + 1,
+        ));
+
+        let next_array_ptr = match self.next_array.compare_and_set(
+            Shared::null(),
+            allocated_array_ptr,
+            (Ordering::Release, Ordering::Relaxed),
+            guard,
+        ) {
+            Ok(next_array_ptr) => next_array_ptr,
+            Err(_) => self.next_array.load_consume(guard),
+        };
+
+        assert!(!next_array_ptr.is_null());
+        let next_array = unsafe { next_array_ptr.deref() };
+
+        self.grow_into(next_array, guard);
+
+        next_array
     }
 
     fn grow_into(&self, next_array: &'g BucketArray<K, V, S>, guard: &'g Guard) {
-        'outer: for this_bucket in self.buckets.iter() {
+        for this_bucket in self.buckets.iter() {
             let mut this_bucket_ptr = this_bucket.load_consume(guard);
 
-            if this_bucket_ptr.tag().has_redirect() {
-                continue;
-            }
-
-            let mut this_bucket_ref = match unsafe { this_bucket_ptr.as_ref() } {
-                Some(b) => b,
-                None => {
-                    loop {
-                        match this_bucket.compare_and_set_weak(
-                            this_bucket_ptr,
-                            this_bucket_ptr.with_tag(this_bucket_ptr.tag().with_redirect()),
-                            (Ordering::AcqRel, Ordering::Acquire),
-                            guard,
-                        ) {
-                            Ok(_) => continue 'outer,
-                            Err(e) => {
-                                this_bucket_ptr = e.current;
-
-                                if this_bucket_ptr.tag().has_redirect() {
-                                    continue 'outer;
-                                }
-
-                                if !this_bucket_ptr.is_null() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    unsafe { this_bucket_ptr.deref() }
-                }
-            };
-
             // if we insert a bucket that is then tombstone-d, we need to
-            // insert a second time to remove that tombtsone
-            let mut was_inserted = false;
+            // insert into the new bucket arrays
+            let mut maybe_hash = None;
 
             loop {
                 if this_bucket_ptr.tag().has_redirect() {
                     break;
                 }
 
-                if !was_inserted && this_bucket_ref.is_tombstone() {
-                    match this_bucket.compare_and_set_weak(
-                        this_bucket_ptr,
-                        this_bucket_ptr.with_tag(this_bucket_ptr.tag().with_redirect()),
-                        (Ordering::AcqRel, Ordering::Acquire),
-                        guard,
-                    ) {
-                        Ok(_) => break,
-                        Err(e) => {
-                            this_bucket_ptr = e.current;
-                            assert!(!this_bucket_ptr.is_null());
-                            this_bucket_ref = unsafe { this_bucket_ptr.deref() };
+                // if we already inserted this bucket, or if this bucket is
+                // non-null and not a tombstone
+                if maybe_hash.is_some()
+                    || !unsafe { this_bucket_ptr.as_ref() }
+                        .map(Bucket::is_tombstone)
+                        .unwrap_or(true)
+                {
+                    assert!(!this_bucket_ptr.is_null());
 
-                            continue;
-                        }
-                    }
+                    let hash = maybe_hash.unwrap_or_else(|| {
+                        let key = unsafe { &this_bucket_ptr.deref().key };
+
+                        self.get_hash(key)
+                    });
+
+                    next_array.insert(this_bucket_ptr, hash, guard);
+                    maybe_hash = Some(hash);
                 }
 
-                // insert into the next array
-                let this_key = &this_bucket_ref.key;
-                let hash = self.get_hash(this_key);
-
-                next_array.insert(this_bucket_ptr, hash, guard);
-                was_inserted = true;
-
-                // strong CAS to avoid spurious insert/remove pairs
+                // strong CAS to avoid spurious duplicate re-insertions
                 match this_bucket.compare_and_set(
                     this_bucket_ptr,
                     this_bucket_ptr.with_tag(this_bucket_ptr.tag().with_redirect()),
-                    (Ordering::AcqRel, Ordering::Acquire),
+                    (Ordering::Release, Ordering::Relaxed),
                     guard,
                 ) {
                     Ok(_) => break,
-                    Err(e) => {
-                        this_bucket_ptr = e.current;
-                        assert!(!this_bucket_ptr.is_null());
-                        this_bucket_ref = unsafe { this_bucket_ptr.deref() };
-                    }
+                    Err(_) => this_bucket_ptr = this_bucket.load_consume(guard),
                 }
             }
         }
     }
 
-    fn get_next(&self, guard: &'g Guard) -> Option<&'g BucketArray<K, V, S>> {
-        unsafe { self.next_array.load_consume(guard).as_ref() }
+    unsafe fn get_next_unchecked(&self, guard: &'g Guard) -> &'g BucketArray<K, V, S> {
+        let next_array_ptr = self.next_array.load_consume(guard);
+        assert!(!next_array_ptr.is_null());
+
+        let next_array = next_array_ptr.deref();
+        self.grow_into(next_array, guard);
+
+        next_array
     }
 }
 
