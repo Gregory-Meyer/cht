@@ -12,7 +12,7 @@ and deletions.
 In your `Cargo.toml`:
 
 ```toml
-cht = "0.1"
+cht = "^0.2.0"
 ```
 
 Then in your code:
@@ -29,7 +29,9 @@ let threads: Vec<_> = (0..16)
         let map = map.clone();
 
         thread::spawn(move || {
-            for j in 0..64 {
+            const NUM_INSERTIONS: usize = 64;
+
+            for j in (i * NUM_INSERTIONS)..((i + 1) * NUM_INSERTIONS) {
                 map.insert_and(j, j, |prev| assert_eq!(prev, None));
             }
         })
