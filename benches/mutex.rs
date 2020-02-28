@@ -8,7 +8,7 @@ use std::{
     thread,
 };
 
-use ahash::ABuildHasher;
+use ahash::RandomState;
 use criterion::{criterion_group, criterion_main, Criterion};
 use hashbrown::{hash_map::Entry, HashMap};
 use parking_lot::RwLock;
@@ -17,10 +17,10 @@ struct ConcurrentHashMap<K: Hash + Eq, V, S: BuildHasher> {
     map: RwLock<HashMap<K, Arc<RwLock<V>>, S>>,
 }
 
-impl<K: Hash + Eq, V> ConcurrentHashMap<K, V, ABuildHasher> {
-    fn new() -> ConcurrentHashMap<K, V, ABuildHasher> {
+impl<K: Hash + Eq, V> ConcurrentHashMap<K, V, RandomState> {
+    fn new() -> ConcurrentHashMap<K, V, RandomState> {
         ConcurrentHashMap {
-            map: RwLock::new(HashMap::with_hasher(ABuildHasher::default())),
+            map: RwLock::new(HashMap::with_hasher(RandomState::default())),
         }
     }
 }

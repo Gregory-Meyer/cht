@@ -30,12 +30,12 @@ use std::{
     hash::{BuildHasher, Hash, Hasher},
     mem::{self},
     sync::{
-        atomic::{self, AtomicBool, AtomicUsize, Ordering},
+        atomic::{self, AtomicUsize, Ordering},
         Arc,
     },
 };
 
-use ahash::ABuildHasher;
+use ahash::RandomState;
 use crossbeam_epoch::{self, Atomic, Guard, Owned, Shared};
 
 /// Default hasher for `HashMap`.
@@ -49,7 +49,7 @@ use crossbeam_epoch::{self, Atomic, Guard, Owned, Shared};
 /// [aHash]: https://docs.rs/ahash
 /// [AES-NI]: https://en.wikipedia.org/wiki/AES_instruction_set
 /// [Fx Hash]: https://docs.rs/fxhash
-pub type DefaultHashBuilder = ABuildHasher;
+pub type DefaultHashBuilder = RandomState;
 
 /// A lockfree concurrent hash map implemented with open addressing and linear
 /// probing.
