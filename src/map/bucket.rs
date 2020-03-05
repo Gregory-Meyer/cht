@@ -487,7 +487,7 @@ impl<'g, K: 'g, V: 'g> BucketArray<K, V> {
             let new_next = maybe_new_next.unwrap_or_else(|| {
                 Owned::new(BucketArray::with_capacity(
                     self.epoch + 1,
-                    self.buckets.len() * 2,
+                    self.buckets.len(),
                 ))
             });
 
