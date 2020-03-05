@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2019 Gregory Meyer
+// Copyright (c) 2020 Gregory Meyer
 //
 // Permission is hereby granted, free of charge, to any person
 // obtaining a copy of this software and associated documentation files
@@ -366,19 +366,19 @@ mod tests {
         assert!(map.is_empty());
         assert_eq!(map.len(), 0);
 
-        assert_eq!(map.modify("foo", |x| x * 2), None);
+        assert_eq!(map.modify("foo", |_, x| x * 2), None);
 
         assert!(map.is_empty());
         assert_eq!(map.len(), 0);
 
         map.insert("foo", 1);
-        assert_eq!(map.modify("foo", |x| x * 2), Some(1));
+        assert_eq!(map.modify("foo", |_, x| x * 2), Some(1));
 
         assert!(!map.is_empty());
         assert_eq!(map.len(), 1);
 
         map.remove("foo");
-        assert_eq!(map.modify("foo", |x| x * 2), None);
+        assert_eq!(map.modify("foo", |_, x| x * 2), None);
 
         assert!(map.is_empty());
         assert_eq!(map.len(), 0);
@@ -408,7 +408,7 @@ mod tests {
                     barrier.wait();
 
                     for j in (i as i32 * MAX_VALUE)..((i as i32 + 1) * MAX_VALUE) {
-                        assert_eq!(map.modify(&j, |x| x * 2), Some(j));
+                        assert_eq!(map.modify(j, |_, x| x * 2), Some(j));
                     }
                 })
             })
@@ -449,7 +449,7 @@ mod tests {
                     barrier.wait();
 
                     for i in 0..MAX_VALUE {
-                        assert!(map.modify(&i, |x| x + 1).is_some());
+                        assert!(map.modify(i, |_, x| x + 1).is_some());
                     }
                 })
             })
@@ -471,10 +471,10 @@ mod tests {
     fn hash_map_insert_or_modify() {
         let map = HashMap::new();
 
-        assert_eq!(map.insert_or_modify("foo", 1, |x| x + 1), None);
+        assert_eq!(map.insert_or_modify("foo", 1, |_, x| x + 1), None);
         assert_eq!(map.get("foo"), Some(1));
 
-        assert_eq!(map.insert_or_modify("foo", 1, |x| x + 1), Some(1));
+        assert_eq!(map.insert_or_modify("foo", 1, |_, x| x + 1), Some(1));
         assert_eq!(map.get("foo"), Some(2));
     }
 
@@ -495,7 +495,7 @@ mod tests {
                     barrier.wait();
 
                     for j in 0..MAX_VALUE {
-                        map.insert_or_modify(j, 1, |x| x + 1);
+                        map.insert_or_modify(j, 1, |_, x| x + 1);
                     }
                 })
             })
@@ -551,7 +551,7 @@ mod tests {
         const NUM_THREADS: usize = 64;
         const MAX_VALUE: i32 = 512;
 
-        let map = Arc::new(HashMap::new());
+        let map = Arc::new(HashMap::with_capacity(1));
         let barrier = Arc::new(Barrier::new(NUM_THREADS));
 
         let threads: Vec<_> = (0..NUM_THREADS)
