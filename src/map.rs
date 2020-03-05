@@ -27,6 +27,9 @@
 
 mod bucket;
 
+#[cfg(test)]
+mod tests;
+
 use bucket::{Bucket, BucketArray, InsertOrModifyState, KeyOrOwnedBucket};
 
 use std::{
