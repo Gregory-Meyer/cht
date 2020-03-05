@@ -470,6 +470,20 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, |_, _| true, with_previous_entry)
     }
 
+    /// If there is a value associated with `key` and `condition` returns true
+    /// when invoked with the current entry, remove and return a copy of its
+    /// value.
+    ///
+    /// `condition` may be invoked one or more times, even if no entry was
+    /// removed.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`. `K` and `V` must implement [`Clone`], as other
+    /// threads may hold references to the entry.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     pub fn remove_if<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool>(
         &self,
         key: &Q,
@@ -482,6 +496,19 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, condition, move |_, v| v.clone())
     }
 
+    /// If there is a value associated with `key` and `condition` returns true
+    /// when invoked with the current entry, remove and return a copy of it.
+    ///
+    /// `condition` may be invoked one or more times, even if no entry was
+    /// removed.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`. `K` and `V` must implement [`Clone`], as other
+    /// threads may hold references to the entry.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     pub fn remove_entry_if<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool>(
         &self,
         key: &Q,
@@ -494,6 +521,20 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, condition, move |k, v| (k.clone(), v.clone()))
     }
 
+    /// If there is a value associated with `key` and `condition` returns true
+    /// when invoked with the current entry, remove it and return the result of
+    /// invoking `with_previous_value` with its value.
+    ///
+    /// `condition` may be invoked one or more times, even if no entry was
+    /// removed. If `condition` failed or there was no value associated with
+    /// `key`, `with_previous_entry` is not invoked and [`None`] is returned.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     pub fn remove_if_and<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool, G: FnOnce(&V) -> T, T>(
         &self,
         key: &Q,
@@ -506,6 +547,20 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, condition, move |_, v| with_previous_value(v))
     }
 
+    /// If there is a value associated with `key` and `condition` returns true
+    /// when invoked with the current entry, remove it and return the result of
+    /// invoking `with_previous_entry` with it.
+    ///
+    /// `condition` may be invoked one or more times, even if no entry was
+    /// removed. If `condition` failed or there was no value associated with
+    /// `key`, `with_previous_entry` is not invoked and [`None`] is returned.
+    ///
+    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
+    /// *must* match that of `K`.
+    ///
+    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     pub fn remove_entry_if_and<
         Q: Hash + Eq + ?Sized,
         F: FnMut(&K, &V) -> bool,
