@@ -186,7 +186,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         K: Borrow<Q>,
         V: Clone,
     {
-        self.get_and(key, V::clone)
+        self.get_key_value_and(key, |_, v| v.clone())
     }
 
     /// Returns a copy of the key and value corresponding to `key`.
@@ -299,7 +299,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         V: Clone,
     {
-        self.insert_and(key, value, V::clone)
+        self.insert_entry_and(key, value, |_, v| v.clone())
     }
 
     /// Inserts a key-value pair, then returns a copy of the previous entry.
@@ -317,7 +317,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         K: Clone,
         V: Clone,
     {
-        self.insert_entry_and(key, value, move |k, v| (k.clone(), v.clone()))
+        self.insert_entry_and(key, value, |k, v| (k.clone(), v.clone()))
     }
 
     /// Inserts a key-value pair, then invokes `with_previous_value` with the
@@ -578,7 +578,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         V: Clone,
     {
-        self.insert_or_modify_and(key, value, on_modify, V::clone)
+        self.insert_with_or_modify_entry_and(key, move || value, on_modify, |_, v| v.clone())
     }
 
     /// Insert a value if none is associated with `key`. Otherwise, replace the
@@ -603,7 +603,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         K: Clone,
         V: Clone,
     {
-        self.insert_or_modify_entry_and(key, value, on_modify, |k, v| (k.clone(), v.clone()))
+        self.insert_with_or_modify_entry_and(
+            key,
+            move || value,
+            on_modify,
+            |k, v| (k.clone(), v.clone()),
+        )
     }
 
     /// Insert the result of `on_insert` if no value is associated with `key`.
@@ -631,7 +636,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         V: Clone,
     {
-        self.insert_with_or_modify_and(key, on_insert, on_modify, V::clone)
+        self.insert_with_or_modify_entry_and(key, on_insert, on_modify, |_, v| v.clone())
     }
 
     /// Insert the result of `on_insert` if no value is associated with `key`.
@@ -682,7 +687,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         on_modify: F,
         with_old_value: G,
     ) -> Option<T> {
-        self.insert_with_or_modify_and(key, move || value, on_modify, with_old_value)
+        self.insert_with_or_modify_entry_and(
+            key,
+            move || value,
+            on_modify,
+            move |_, v| with_old_value(v),
+        )
     }
 
     /// Insert a value if none is associated with `key`. Otherwise, replace the
@@ -825,7 +835,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         V: Clone,
     {
-        self.modify_and(key, on_modify, V::clone)
+        self.modify_entry_and(key, on_modify, |_, v| v.clone())
     }
 
     /// If there is a value associated with `key`, replace it with the result of
