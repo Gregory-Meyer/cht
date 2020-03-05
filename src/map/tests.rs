@@ -872,3 +872,32 @@ fn drop_many_values_concurrent() {
         assert!(this_value_parent.was_dropped());
     }
 }
+
+#[test]
+fn remove_if() {
+    const NUM_VALUES: usize = 512;
+
+    let is_even = |_: &usize, v: &usize| *v % 2 == 0;
+
+    let map = HashMap::new();
+
+    for i in 0..NUM_VALUES {
+        assert_eq!(map.insert(i, i), None);
+    }
+
+    for i in 0..NUM_VALUES {
+        if is_even(&i, &i) {
+            assert_eq!(map.remove_if(&i, is_even), Some(i));
+        } else {
+            assert_eq!(map.remove_if(&i, is_even), None);
+        }
+    }
+
+    for i in (0..NUM_VALUES).filter(|i| i % 2 == 0) {
+        assert_eq!(map.get(&i), None);
+    }
+
+    for i in (0..NUM_VALUES).filter(|i| i % 2 != 0) {
+        assert_eq!(map.get(&i), Some(i));
+    }
+}

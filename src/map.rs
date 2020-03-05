@@ -411,7 +411,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         K: Borrow<Q>,
         V: Clone,
     {
-        self.remove_and(key, V::clone)
+        self.remove_entry_if_and(key, |_, _| true, |_, v| v.clone())
     }
 
     /// If there is a value associated with `key`, remove it and return a copy
@@ -429,7 +429,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         K: Borrow<Q> + Clone,
         V: Clone,
     {
-        self.remove_entry_and(key, |k, v| (k.clone(), v.clone()))
+        self.remove_entry_if_and(key, |_, _| true, |k, v| (k.clone(), v.clone()))
     }
 
     /// If there is a value associated with `key`, remove it and return the
@@ -448,7 +448,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
-        self.remove_entry_and(key, move |_, v| with_previous_value(v))
+        self.remove_entry_if_and(key, |_, _| true, move |_, v| with_previous_value(v))
     }
 
     /// If there is a value associated with `key`, remove it and return the
@@ -467,6 +467,59 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
+        self.remove_entry_if_and(key, |_, _| true, with_previous_entry)
+    }
+
+    pub fn remove_if<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool>(
+        &self,
+        key: &Q,
+        condition: F,
+    ) -> Option<V>
+    where
+        K: Borrow<Q>,
+        V: Clone,
+    {
+        self.remove_entry_if_and(key, condition, move |_, v| v.clone())
+    }
+
+    pub fn remove_entry_if<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool>(
+        &self,
+        key: &Q,
+        condition: F,
+    ) -> Option<(K, V)>
+    where
+        K: Clone + Borrow<Q>,
+        V: Clone,
+    {
+        self.remove_entry_if_and(key, condition, move |k, v| (k.clone(), v.clone()))
+    }
+
+    pub fn remove_if_and<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool, G: FnOnce(&V) -> T, T>(
+        &self,
+        key: &Q,
+        condition: F,
+        with_previous_value: G,
+    ) -> Option<T>
+    where
+        K: Borrow<Q>,
+    {
+        self.remove_entry_if_and(key, condition, move |_, v| with_previous_value(v))
+    }
+
+    pub fn remove_entry_if_and<
+        Q: Hash + Eq + ?Sized,
+        F: FnMut(&K, &V) -> bool,
+        G: FnOnce(&K, &V) -> T,
+        T,
+    >(
+        &self,
+        key: &Q,
+        mut condition: F,
+        with_previous_entry: G,
+    ) -> Option<T>
+    where
+        K: Borrow<Q>,
+    {
         let guard = &crossbeam_epoch::pin();
         let current_ref = self.bucket_array(guard);
         let mut bucket_array_ref = current_ref;
@@ -475,7 +528,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         let result;
 
         loop {
-            match bucket_array_ref.remove(guard, hash, key) {
+            match bucket_array_ref.remove_if(guard, hash, key, condition) {
                 Ok(previous_bucket_ptr) => {
                     if let Some(previous_bucket_ref) = unsafe { previous_bucket_ptr.as_ref() } {
                         let Bucket {
@@ -492,7 +545,8 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
 
                     break;
                 }
-                Err(_) => {
+                Err(c) => {
+                    condition = c;
                     bucket_array_ref = bucket_array_ref.rehash(guard, &self.build_hasher);
                 }
             }
