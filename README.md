@@ -12,7 +12,7 @@ and deletions.
 In your `Cargo.toml`:
 
 ```toml
-cht = "^0.2.0"
+cht = "^0.3.0"
 ```
 
 Then in your code:
