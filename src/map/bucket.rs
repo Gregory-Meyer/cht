@@ -149,7 +149,7 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         hash: u64,
         key: &Q,
         mut condition: F,
-    ) -> Result<Shared<'g, Bucket<K, V>>, RelocatedError>
+    ) -> Result<Shared<'g, Bucket<K, V>>, F>
     where
         K: Borrow<Q>,
     {
@@ -191,20 +191,8 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         match loop_result {
             ProbeLoopResult::Returned(t) => Ok(t),
             ProbeLoopResult::LoopEnded => Ok(Shared::null()),
-            ProbeLoopResult::FoundSentinelTag => Err(RelocatedError),
+            ProbeLoopResult::FoundSentinelTag => Err(condition),
         }
-    }
-
-    pub(crate) fn remove<Q: ?Sized + Eq>(
-        &self,
-        guard: &'g Guard,
-        hash: u64,
-        key: &Q,
-    ) -> Result<Shared<'g, Bucket<K, V>>, RelocatedError>
-    where
-        K: Borrow<Q>,
-    {
-        self.remove_if(guard, hash, key, |_, _| true)
     }
 
     pub(crate) fn modify<F: FnMut(&K, &V) -> V>(
@@ -768,18 +756,18 @@ mod tests {
         assert_eq!(buckets.get(guard, h3, k3), Ok(b3));
 
         assert_eq!(
-            buckets.remove(guard, h1, k1),
-            Ok(b1.with_tag(TOMBSTONE_TAG))
+            buckets.remove_if(guard, h1, k1, |_, _| true).ok().unwrap(),
+            b1.with_tag(TOMBSTONE_TAG)
         );
         unsafe { defer_destroy_tombstone(guard, b1.with_tag(TOMBSTONE_TAG)) };
         assert_eq!(
-            buckets.remove(guard, h2, k2),
-            Ok(b2.with_tag(TOMBSTONE_TAG))
+            buckets.remove_if(guard, h2, k2, |_, _| true).ok().unwrap(),
+            b2.with_tag(TOMBSTONE_TAG)
         );
         unsafe { defer_destroy_tombstone(guard, b2.with_tag(TOMBSTONE_TAG)) };
         assert_eq!(
-            buckets.remove(guard, h3, k3),
-            Ok(b3.with_tag(TOMBSTONE_TAG))
+            buckets.remove_if(guard, h3, k3, |_, _| true).ok().unwrap(),
+            b3.with_tag(TOMBSTONE_TAG)
         );
         unsafe { defer_destroy_tombstone(guard, b3.with_tag(TOMBSTONE_TAG)) };
 
