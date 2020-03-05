@@ -22,9 +22,14 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+mod util;
+
+use util::{DropNotifier, NoisyDropper};
+
 use super::*;
 
 use std::{
+    iter,
     sync::{Arc, Barrier},
     thread::{self, JoinHandle},
 };
@@ -605,5 +610,265 @@ fn concurrent_overlapped_removal() {
 
     for i in 0..MAX_VALUE {
         assert_eq!(map.get(&i), None);
+    }
+}
+
+#[test]
+fn drop_value() {
+    let key_parent = Arc::new(DropNotifier::new());
+    let value_parent = Arc::new(DropNotifier::new());
+
+    {
+        let map = HashMap::new();
+
+        assert_eq!(
+            map.insert_and(
+                NoisyDropper::new(key_parent.clone(), 0),
+                NoisyDropper::new(value_parent.clone(), 0),
+                |_| ()
+            ),
+            None
+        );
+        assert!(!map.is_empty());
+        assert_eq!(map.len(), 1);
+        map.get_and(&0, |v| assert_eq!(v, &0));
+
+        map.remove_and(&0, |v| assert_eq!(v, &0));
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+        assert_eq!(map.get_and(&0, |_| ()), None);
+
+        util::run_deferred();
+
+        assert!(!key_parent.was_dropped());
+        assert!(value_parent.was_dropped());
+    }
+
+    util::run_deferred();
+
+    assert!(key_parent.was_dropped());
+    assert!(value_parent.was_dropped());
+}
+
+#[test]
+fn drop_many_values() {
+    const NUM_VALUES: usize = 1 << 16;
+
+    let key_parents: Vec<_> = iter::repeat_with(|| Arc::new(DropNotifier::new()))
+        .take(NUM_VALUES)
+        .collect();
+    let value_parents: Vec<_> = iter::repeat_with(|| Arc::new(DropNotifier::new()))
+        .take(NUM_VALUES)
+        .collect();
+
+    {
+        let map = HashMap::new();
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        for (i, (this_key_parent, this_value_parent)) in
+            key_parents.iter().zip(value_parents.iter()).enumerate()
+        {
+            assert_eq!(
+                map.insert_and(
+                    NoisyDropper::new(this_key_parent.clone(), i),
+                    NoisyDropper::new(this_value_parent.clone(), i),
+                    |_| ()
+                ),
+                None
+            );
+
+            assert!(!map.is_empty());
+            assert_eq!(map.len(), i + 1);
+        }
+
+        for i in 0..NUM_VALUES {
+            assert_eq!(
+                map.get_key_value_and(&i, |k, v| {
+                    assert_eq!(*k, i);
+                    assert_eq!(*v, i);
+                }),
+                Some(())
+            );
+        }
+
+        for i in 0..NUM_VALUES {
+            assert_eq!(
+                map.remove_entry_and(&i, |k, v| {
+                    assert_eq!(*k, i);
+                    assert_eq!(*v, i);
+                }),
+                Some(())
+            );
+        }
+
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        util::run_deferred();
+
+        for this_key_parent in key_parents.iter() {
+            assert!(!this_key_parent.was_dropped());
+        }
+
+        for this_value_parent in value_parents.iter() {
+            assert!(this_value_parent.was_dropped());
+        }
+
+        for i in 0..NUM_VALUES {
+            assert_eq!(map.get_and(&i, |_| ()), None);
+        }
+    }
+
+    util::run_deferred();
+
+    for this_key_parent in key_parents.into_iter() {
+        assert!(this_key_parent.was_dropped());
+    }
+
+    for this_value_parent in value_parents.into_iter() {
+        assert!(this_value_parent.was_dropped());
+    }
+}
+
+#[test]
+fn drop_many_values_concurrent() {
+    const NUM_THREADS: usize = 64;
+    const NUM_VALUES_PER_THREAD: usize = 512;
+    const NUM_VALUES: usize = NUM_THREADS * NUM_VALUES_PER_THREAD;
+
+    let key_parents: Arc<Vec<_>> = Arc::new(
+        iter::repeat_with(|| Arc::new(DropNotifier::new()))
+            .take(NUM_VALUES)
+            .collect(),
+    );
+    let value_parents: Arc<Vec<_>> = Arc::new(
+        iter::repeat_with(|| Arc::new(DropNotifier::new()))
+            .take(NUM_VALUES)
+            .collect(),
+    );
+
+    {
+        let map = Arc::new(HashMap::new());
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
+
+        let handles: Vec<_> = (0..NUM_THREADS)
+            .map(|i| {
+                let map = Arc::clone(&map);
+                let barrier = Arc::clone(&barrier);
+                let key_parents = Arc::clone(&key_parents);
+                let value_parents = Arc::clone(&value_parents);
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    let these_key_parents =
+                        &key_parents[i * NUM_VALUES_PER_THREAD..(i + 1) * NUM_VALUES_PER_THREAD];
+                    let these_value_parents =
+                        &value_parents[i * NUM_VALUES_PER_THREAD..(i + 1) * NUM_VALUES_PER_THREAD];
+
+                    for (j, (this_key_parent, this_value_parent)) in these_key_parents
+                        .iter()
+                        .zip(these_value_parents.iter())
+                        .enumerate()
+                    {
+                        let key_value = i * NUM_VALUES_PER_THREAD + j;
+
+                        assert_eq!(
+                            map.insert_and(
+                                NoisyDropper::new(this_key_parent.clone(), key_value),
+                                NoisyDropper::new(this_value_parent.clone(), key_value),
+                                |_| ()
+                            ),
+                            None
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for result in handles.into_iter().map(JoinHandle::join) {
+            assert!(result.is_ok());
+        }
+
+        assert!(!map.is_empty());
+        assert_eq!(map.len(), NUM_VALUES);
+
+        util::run_deferred();
+
+        for this_key_parent in key_parents.iter() {
+            assert!(!this_key_parent.was_dropped());
+        }
+
+        for this_value_parent in value_parents.iter() {
+            assert!(!this_value_parent.was_dropped());
+        }
+
+        for i in 0..NUM_VALUES {
+            assert_eq!(
+                map.get_key_value_and(&i, |k, v| {
+                    assert_eq!(*k, i);
+                    assert_eq!(*v, i);
+                }),
+                Some(())
+            );
+        }
+
+        let handles: Vec<_> = (0..NUM_THREADS)
+            .map(|i| {
+                let map = Arc::clone(&map);
+                let barrier = Arc::clone(&barrier);
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    for j in 0..NUM_VALUES_PER_THREAD {
+                        let key_value = i * NUM_VALUES_PER_THREAD + j;
+
+                        assert_eq!(
+                            map.remove_entry_and(&key_value, |k, v| {
+                                assert_eq!(*k, key_value);
+                                assert_eq!(*v, key_value);
+                            }),
+                            Some(())
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for result in handles.into_iter().map(JoinHandle::join) {
+            assert!(result.is_ok());
+        }
+
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        util::run_deferred();
+
+        for this_key_parent in key_parents.iter() {
+            assert!(!this_key_parent.was_dropped());
+        }
+
+        for this_value_parent in value_parents.iter() {
+            assert!(this_value_parent.was_dropped());
+        }
+
+        for i in 0..NUM_VALUES {
+            assert_eq!(map.get_and(&i, |_| ()), None);
+        }
+    }
+
+    util::run_deferred();
+
+    for this_key_parent in key_parents.iter() {
+        assert!(this_key_parent.was_dropped());
+    }
+
+    for this_value_parent in value_parents.iter() {
+        assert!(this_value_parent.was_dropped());
     }
 }
