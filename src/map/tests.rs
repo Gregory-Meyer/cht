@@ -55,6 +55,8 @@ fn insertion() {
             assert_eq!(map.get(&k), None);
         }
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -78,6 +80,8 @@ fn growth() {
             assert_eq!(map.get(&k), None);
         }
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -114,6 +118,8 @@ fn concurrent_insertion() {
     for i in 0..MAX_INSERTED_VALUE {
         assert_eq!(map.get(&i), Some(i));
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -150,6 +156,8 @@ fn concurrent_growth() {
     for i in 0..MAX_INSERTED_VALUE {
         assert_eq!(map.get(&i), Some(i));
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -172,6 +180,8 @@ fn removal() {
     for i in 0..MAX_VALUE {
         assert_eq!(map.get(&i), None);
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -213,6 +223,8 @@ fn concurrent_removal() {
     for i in 0..MAX_INSERTED_VALUE {
         assert_eq!(map.get(&i), None);
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -279,6 +291,8 @@ fn concurrent_insertion_and_removal() {
     for i in INSERTED_MIDPOINT..MAX_INSERTED_VALUE {
         assert_eq!(map.get(&i), None);
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -345,6 +359,8 @@ fn concurrent_growth_and_removal() {
     for i in INSERTED_MIDPOINT..MAX_INSERTED_VALUE {
         assert_eq!(map.get(&i), None);
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -370,6 +386,8 @@ fn modify() {
 
     assert!(map.is_empty());
     assert_eq!(map.len(), 0);
+
+    util::run_deferred();
 }
 
 #[test]
@@ -412,6 +430,8 @@ fn concurrent_modification() {
     for i in 0..MAX_INSERTED_VALUE {
         assert_eq!(map.get(&i), Some(i * 2));
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -453,6 +473,8 @@ fn concurrent_overlapped_modification() {
     for i in 0..MAX_VALUE {
         assert_eq!(map.get(&i), Some(NUM_THREADS as i32));
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -464,6 +486,8 @@ fn insert_or_modify() {
 
     assert_eq!(map.insert_or_modify("foo", 1, |_, x| x + 1), Some(1));
     assert_eq!(map.get("foo"), Some(2));
+
+    util::run_deferred();
 }
 
 #[test]
@@ -498,6 +522,8 @@ fn concurrent_insert_or_modify() {
     for i in 0..MAX_VALUE {
         assert_eq!(map.get(&i), Some(NUM_THREADS as i32));
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -532,6 +558,8 @@ fn concurrent_overlapped_insertion() {
     for i in 0..MAX_VALUE {
         assert_eq!(map.get(&i), Some(i));
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -566,6 +594,8 @@ fn concurrent_overlapped_growth() {
     for i in 0..MAX_VALUE {
         assert_eq!(map.get(&i), Some(i));
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -611,6 +641,8 @@ fn concurrent_overlapped_removal() {
     for i in 0..MAX_VALUE {
         assert_eq!(map.get(&i), None);
     }
+
+    util::run_deferred();
 }
 
 #[test]
@@ -900,4 +932,6 @@ fn remove_if() {
     for i in (0..NUM_VALUES).filter(|i| i % 2 != 0) {
         assert_eq!(map.get(&i), Some(i));
     }
+
+    util::run_deferred();
 }
