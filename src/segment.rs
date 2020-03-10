@@ -22,6 +22,17 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+//! Segmented hash tables.
+//!
+//! Segmented hash tables are divided into a user-defined number of smaller hash
+//! maps. The most-significant bits of hashed keys are used to select which
+//! segment a key will be inserted to.
+//!
+//! Compared to the unsegmented hash table in this crate, the segmented hash
+//! table has better maximum concurrent write throughput for disjoint sets of
+//! keys, but slightly worse read and single-threaded write performance due to
+//! the extra layer of indirection introduced by segmenting.
+
 pub mod map;
 
 pub use map::HashMap;

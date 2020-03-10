@@ -22,6 +22,9 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+//! Lockfree concurrent segmented hash map implemented with open addressing and
+//! linear probing.
+
 use crate::map::{
     bucket::{self, BucketArray},
     bucket_array_ref::BucketArrayRef,
@@ -37,17 +40,8 @@ use std::{
 
 use crossbeam_epoch::Atomic;
 
-/// Lockfree concurrent hash map implemented with submap striping, open
-/// addressing, and linear probing.
-///
-/// This map is striped using the high bits of key hashes, meaning that entries
-/// are spread across multiple sub hash maps (submaps). By default, the
-/// `num-cpus` feature is enabled and [`new`] and [`with_capacity`] will create
-/// hash tables with at least as many submaps as the system has CPUs. Otherwise,
-/// the user can specify the desired minimum number of submaps as parameters to
-/// [`with_stripes`], [`with_stripes_and_capacity`],
-/// [`with_stripes_and_hasher`], and [`with_stripes_capacity_and_hasher`]. The
-/// actual number of submaps is always a power of two.
+/// Lockfree concurrent segmented hash map implemented with open addressing and
+/// linear probing.
 ///
 /// The default hashing algorithm is [aHash], a hashing algorithm that is
 /// accelerated by the [AES-NI] instruction set on x86 proessors. aHash provides
@@ -55,7 +49,20 @@ use crossbeam_epoch::Atomic;
 /// resistance as something like [`RandomState`].
 ///
 /// The hashing algorithm to be used can be chosen on a per-`HashMap` basis
-/// using the [`with_hasher`] and [`with_capacity_and_hasher`] methods.
+/// using the [`with_hasher`], [`with_capacity_and_hasher`], and
+/// [`with_num_segments_capacity_and_hasher`] methods.
+///
+/// This map is segmented using the most-significant bits of hashed keys,
+/// meaning that entries are spread across several smaller hash maps (segments).
+/// Changing the number of segments in a map after construction is not
+/// supported.
+///
+/// The minimum number of segments can be specified as a parameter to
+/// [`with_num_segments`], [`with_num_segments_and_capacity`],
+/// [`with_num_segments_and_hasher`], and
+/// [`with_num_segments_capacity_and_hasher`]. By default, the `num-cpus`
+/// feature is enabled and [`new`] and [`with_capacity`] will create maps with
+/// at least twice as many segments as the system has CPUs.
 ///
 /// Key types must implement [`Hash`] and [`Eq`]. Any operations that return a
 /// key or value require the return types to implement [`Clone`], as elements
@@ -63,10 +70,10 @@ use crossbeam_epoch::Atomic;
 ///
 /// [`new`]: #method.new
 /// [`with_capacity`]: #method.with_capacity
-/// [`with_stripes`]: #method.with_stripes
-/// [`with_stripes_and_capacity`]: #method.with_stripes_and_capacity
-/// [`with_stripes_and_hasher`]: #method.with_stripes_and_hasher
-/// [`with_stripes_capacity_and_hasher`]: #method.with_stripes_capacity_and_hasher
+/// [`with_num_segments`]: #method.with_num_segments
+/// [`with_num_segments_and_capacity`]: #method.with_num_segments_and_capacity
+/// [`with_num_segments_and_hasher`]: #method.with_num_segments_and_hasher
+/// [`with_num_segments_capacity_and_hasher`]: #method.with_num_segments_capacity_and_hasher
 /// [aHash]: https://docs.rs/ahash
 /// [AES-NI]: https://en.wikipedia.org/wiki/AES_instruction_set
 /// [`RandomState`]: https://doc.rust-lang.org/std/collections/hash_map/struct.RandomState.html
@@ -77,25 +84,25 @@ use crossbeam_epoch::Atomic;
 /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
 #[derive(Default)]
 pub struct HashMap<K, V, S = DefaultHashBuilder> {
-    stripes: Box<[(Atomic<BucketArray<K, V>>, AtomicUsize)]>,
+    segments: Box<[Segment<K, V>]>,
     build_hasher: S,
     len: AtomicUsize,
-    stripe_shift: u32,
+    segment_shift: u32,
 }
 
 #[cfg(feature = "num-cpus")]
 impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// Creates an empty `HashMap`.
     ///
-    /// The hash map is created with a capacity of 0 and will not allocate any
-    /// submaps until the first insertion. It will, however, allocate space for
-    /// submap pointers.
+    /// The hash map is created with a capacity of 0 and no memory for segments
+    /// will be allocated until the first insertion to each segment. However,
+    /// memory will always be allocated to store segment pointers and lengths.
     ///
-    /// The `HashMap` will be created with at least as many submaps as the
-    /// system has CPUs.
+    /// The `HashMap` will be created with at least twice as many segments as
+    /// the system has CPUs.
     pub fn new() -> Self {
-        Self::with_stripes_capacity_and_hasher(
-            Self::default_num_stripes(),
+        Self::with_num_segments_capacity_and_hasher(
+            Self::default_num_segments(),
             0,
             DefaultHashBuilder::default(),
         )
@@ -104,181 +111,222 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// Creates an empty `HashMap` with space for at least `capacity` elements
     /// without reallocating.
     ///
-    /// If `capacity == 0`, only space for submap pointers and lengths will be
-    /// allocated.
+    /// If `capacity == 0`, no memory for segments will be allocated until the
+    /// first insertion to each segment. However, memory will always be
+    /// allocated to store segment pointers and lengths.
     ///
-    /// The `HashMap` will be created with at least as many submaps as the
-    /// system has CPUs.
+    /// The `HashMap` will be created with at least twice as many segments as
+    /// the system has CPUs.
     pub fn with_capacity(capacity: usize) -> Self {
-        Self::with_stripes_capacity_and_hasher(
-            Self::default_num_stripes(),
+        Self::with_num_segments_capacity_and_hasher(
+            Self::default_num_segments(),
             capacity,
             DefaultHashBuilder::default(),
         )
     }
 
-    fn default_num_stripes() -> usize {
+    fn default_num_segments() -> usize {
         num_cpus::get() * 2
     }
 }
 
 impl<K, V> HashMap<K, V, DefaultHashBuilder> {
-    /// Creates an empty `HashMap` with at least `num_stripes` submaps.
+    /// Creates an empty `HashMap` with at least `num_segments` segments.
     ///
-    /// Each submap will have a capacity of 0 and will require a table to be
-    /// allocated upon the first insertion into that submap.
-    pub fn with_stripes(num_stripes: usize) -> Self {
-        Self::with_stripes_capacity_and_hasher(num_stripes, 0, DefaultHashBuilder::default())
+    /// The hash map is created with a capacity of 0 and no memory for segments
+    /// will be allocated until the first insertion to each segment. However,
+    /// memory will always be allocated to store segment pointers and lengths.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_segments == 0`.
+    pub fn with_num_segments(num_segments: usize) -> Self {
+        Self::with_num_segments_capacity_and_hasher(num_segments, 0, DefaultHashBuilder::default())
     }
 
-    /// Creates an empty `HashMap` with at least `num_stripes` submaps and
-    /// space for at least `capacity` elements in each submap without
+    /// Creates an empty `HashMap` with at least `num_segments` segments and
+    /// space for at least `capacity` elements in each segment without
     /// reallocating.
     ///
-    /// If `capacity == 0`, no submaps will be allocated, but space to hold
-    /// submap pointers and lengths will be allocated.
-    pub fn with_stripes_and_capacity(num_stripes: usize, capacity: usize) -> Self {
-        Self::with_stripes_capacity_and_hasher(num_stripes, capacity, DefaultHashBuilder::default())
+    /// If `capacity == 0`, no memory for segments will be allocated until the
+    /// first insertion to each segment. However, memory will always be
+    /// allocated to store segment pointers and lengths.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_segments == 0`.
+    pub fn with_num_segments_and_capacity(num_segments: usize, capacity: usize) -> Self {
+        Self::with_num_segments_capacity_and_hasher(
+            num_segments,
+            capacity,
+            DefaultHashBuilder::default(),
+        )
     }
 }
 
 impl<K, V, S> HashMap<K, V, S> {
     /// Creates an empty `HashMap` that will use `build_hasher` to hash keys
-    /// with at least `num_stripes` submaps.
+    /// with at least `num_segments` segments.
     ///
-    /// Each submap will have a capacity of 0 and will require a table to be
-    /// allocated upon the first insertion into that submap.
-    pub fn with_stripes_and_hasher(num_stripes: usize, build_hasher: S) -> Self {
-        Self::with_stripes_capacity_and_hasher(num_stripes, 0, build_hasher)
+    /// The hash map is created with a capacity of 0 and no memory for segments
+    /// will be allocated until the first insertion to each segment. However,
+    /// memory will always be allocated to store segment pointers and lengths.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_segments == 0`.
+    pub fn with_num_segments_and_hasher(num_segments: usize, build_hasher: S) -> Self {
+        Self::with_num_segments_capacity_and_hasher(num_segments, 0, build_hasher)
     }
 
     /// Creates an empty `HashMap` that will use `build_hasher` to hash keys,
     /// hold at least `capacity` elements without reallocating, and have at
-    /// least `num_stripes` submaps.
+    /// least `num_segments` segments.
     ///
-    /// If `capacity == 0`, no submaps will be allocated, but space to hold
-    /// submap pointers and lengths will be allocated.
-    pub fn with_stripes_capacity_and_hasher(
-        num_stripes: usize,
+    /// If `capacity == 0`, no memory for segments will be allocated until the
+    /// first insertion to each segment. However, memory will always be
+    /// allocated to store segment pointers and lengths.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_segments == 0`.
+    pub fn with_num_segments_capacity_and_hasher(
+        num_segments: usize,
         capacity: usize,
         build_hasher: S,
     ) -> Self {
-        assert!(num_stripes > 0);
+        assert!(num_segments > 0);
 
-        let actual_num_stripes = num_stripes.next_power_of_two();
-        let stripe_shift = 64 - actual_num_stripes.trailing_zeros();
+        let actual_num_segments = num_segments.next_power_of_two();
+        let segment_shift = 64 - actual_num_segments.trailing_zeros();
 
-        let mut stripes = Vec::with_capacity(actual_num_stripes);
+        let mut segments = Vec::with_capacity(actual_num_segments);
 
         if capacity == 0 {
             unsafe {
-                ptr::write_bytes(stripes.as_mut_ptr(), 0, actual_num_stripes);
-                stripes.set_len(actual_num_stripes);
+                ptr::write_bytes(segments.as_mut_ptr(), 0, actual_num_segments);
+                segments.set_len(actual_num_segments);
             }
         } else {
             let actual_capacity = (capacity * 2).next_power_of_two();
 
-            for _ in 0..actual_num_stripes {
-                stripes.push((
-                    Atomic::new(BucketArray::with_length(0, actual_capacity)),
-                    AtomicUsize::new(0),
-                ));
+            for _ in 0..actual_num_segments {
+                segments.push(Segment {
+                    bucket_array: Atomic::new(BucketArray::with_length(0, actual_capacity)),
+                    len: AtomicUsize::new(0),
+                });
             }
         }
 
-        let stripes = stripes.into_boxed_slice();
+        let segments = segments.into_boxed_slice();
 
         Self {
-            stripes,
+            segments,
             build_hasher,
             len: AtomicUsize::new(0),
-            stripe_shift,
+            segment_shift,
         }
     }
 
-    /// Returns the number of elements that are confirmed to have been inserted
-    /// into this map.
+    /// Returns the number of elements in the map.
     ///
-    /// Because `HashMap` can be updated concurrently, this function reflects
-    /// the number of insert operations that have returned to the user.
-    /// In-progress insertions are not counted.
+    /// # Safety
+    ///
+    /// This method on its own is safe, but other threads can add or remove
+    /// elements at any time.
     pub fn len(&self) -> usize {
         self.len.load(Ordering::Relaxed)
     }
 
-    /// Returns true if this `HashMap` contains no confirmed inserted elements.
+    /// Returns `true` if the map contains no elements.
     ///
-    /// In-progress insertions into this `HashMap` are not considered.
+    /// # Safety
+    ///
+    /// This method on its own is safe, but other threads can add or remove
+    /// elements at any time.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Returns the number of elements this `HashMap` can hold without
-    /// reallocating a table.
+    /// Returns the number of elements the map can hold without reallocating a
+    /// bucket pointer array.
     ///
-    /// As `HashMap` consists of multiple separately allocated subtables, this
-    /// function returns the minimum of each subtable's capacity.
+    /// As the map is composed of multiple separately allocated segments, this
+    /// method returns the minimum capacity of all segments.
     ///
     /// Note that all mutating operations, with the exception of removing
-    /// elements, incur at least one allocation for the associated bucket.
+    /// elements, will result in an allocation for a new bucket.
     ///
-    /// If there are insertion operations in flight, it is possible that a
-    /// new, larger table has already been allocated.
+    /// # Safety
+    ///
+    /// This method on its own is safe, but other threads can increase the
+    /// capacity of each segment at any time by adding elements.
     pub fn capacity(&self) -> usize {
         let guard = &crossbeam_epoch::pin();
 
-        self.stripes
+        self.segments
             .iter()
-            .map(|s| s.0.load_consume(guard))
+            .map(|s| s.bucket_array.load_consume(guard))
             .map(|p| unsafe { p.as_ref() })
             .map(|a| a.map(BucketArray::capacity).unwrap_or(0))
             .min()
             .unwrap()
     }
 
-    /// Returns the number of elements that the `stripe`-th submap of this
-    /// `HashMap` can hold without reallocating a table.
+    /// Returns the number of elements the `index`-th segment of the map can
+    /// hold without reallocating a bucket pointer array.
     ///
     /// Note that all mutating operations, with the exception of removing
-    /// elements, incur at least one allocation for the associated bucket.
+    /// elements, will result in an allocation for a new bucket.
     ///
-    /// If there are insertion operations in flight, it is possible that a
-    /// new, larger table has already been allocated.
-    pub fn submap_capacity(&self, index: usize) -> usize {
-        assert!(index < self.stripes.len());
+    /// # Safety
+    ///
+    /// This method on its own is safe, but other threads can increase the
+    /// capacity of a segment at any time by adding elements.
+    pub fn segment_capacity(&self, index: usize) -> usize {
+        assert!(index < self.segments.len());
 
         let guard = &crossbeam_epoch::pin();
 
-        unsafe { self.stripes[index].0.load_consume(guard).as_ref() }
-            .map(BucketArray::capacity)
-            .unwrap_or(0)
+        unsafe {
+            self.segments[index]
+                .bucket_array
+                .load_consume(guard)
+                .as_ref()
+        }
+        .map(BucketArray::capacity)
+        .unwrap_or(0)
+    }
+
+    /// Returns the number of segments in the map.
+    pub fn num_segments(&self) -> usize {
+        self.segments.len()
     }
 }
 
 impl<K, V, S: BuildHasher> HashMap<K, V, S> {
-    /// Returns the index of the submap that `key` would be located in.
-    pub fn submap_index<Q: Hash>(&self, key: &Q) -> usize
+    /// Returns the index of the segment that `key` would belong to if inserted
+    /// into the map.
+    pub fn segment_index<Q: Hash>(&self, key: &Q) -> usize
     where
         K: Borrow<Q>,
     {
         let hash = bucket::hash(&self.build_hasher, key);
 
-        self.stripe_index_from_hash(hash)
+        self.segment_index_from_hash(hash)
     }
 }
 
 impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
-    /// Returns a copy of the value corresponding to `key`.
+    /// Returns a copy of the value associated with `key`.
     ///
     /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`. `V` must implement [`Clone`], as the value may
-    /// be deleted at any moment; the best we can do is to clone them while we
-    /// know they exist.
+    /// *must* match that of `K`. `V` must implement [`Clone`], as other threads
+    /// may hold references to the associated value.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
-    /// [`get_and`]: #method.get_and
     #[inline]
     pub fn get<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<V>
     where
@@ -288,17 +336,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.get_key_value_and(key, |_, v| v.clone())
     }
 
-    /// Returns a copy of the key and value corresponding to `key`.
+    /// Returns a copy of the key and value associated with `key`.
     ///
     /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`. `K` and `V` must implement [`Clone`], as the
-    /// bucket may be concurrently removed at any time; the best we can do is to
-    /// clone them while we know they exist.
+    /// *must* match that of `K`. `K` and `V` must implement [`Clone`], as other
+    /// threads may hold references to the entry.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
-    /// [`get_key_value_and`]: #method.get_key_value_and
     #[inline]
     pub fn get_key_value<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<(K, V)>
     where
@@ -308,14 +354,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.get_key_value_and(key, |k, v| (k.clone(), v.clone()))
     }
 
-    /// Invokes `with_value` with a reference to the value corresponding to `key`.
+    /// Invokes `with_value` with a reference to the value associated with `key`.
     ///
-    /// `with_value` will only be invoked if there is a value associated with
-    /// `key` contained within this hash map.
+    /// If there is no value associated with `key` in the map, `with_value` will
+    /// not be invoked and [`None`] will be returned.
     ///
     /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
     /// *must* match that of `K`.
     ///
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     #[inline]
@@ -330,15 +377,16 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.get_key_value_and(key, move |_, v| with_value(v))
     }
 
-    /// Invokes `with_entry` with a reference to the key and value corresponding
-    /// to `key`.
+    /// Invokes `with_entry` with a reference to the key and value associated
+    /// with `key`.
     ///
-    /// `with_entry` will only be invoked if there is a value associated with `key`
-    /// contained within this hash map.
+    /// If there is no value associated with `key` in the map, `with_entry` will
+    /// not be invoked and [`None`] will be returned.
     ///
     /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
     /// *must* match that of `K`.
     ///
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     #[inline]
@@ -976,7 +1024,11 @@ impl<K, V, S> Drop for HashMap<K, V, S> {
         let guard = unsafe { &crossbeam_epoch::unprotected() };
         atomic::fence(Ordering::Acquire);
 
-        for (this_bucket_array, _) in self.stripes.iter() {
+        for Segment {
+            bucket_array: this_bucket_array,
+            ..
+        } in self.segments.iter()
+        {
             let mut current_ptr = this_bucket_array.load(Ordering::Relaxed, guard);
 
             while let Some(current_ref) = unsafe { current_ptr.as_ref() } {
@@ -1007,9 +1059,12 @@ impl<K, V, S> Drop for HashMap<K, V, S> {
 impl<K, V, S> HashMap<K, V, S> {
     #[inline]
     fn bucket_array_ref(&'_ self, hash: u64) -> BucketArrayRef<'_, K, V, S> {
-        let index = self.stripe_index_from_hash(hash);
+        let index = self.segment_index_from_hash(hash);
 
-        let (ref bucket_array, ref len) = self.stripes[index];
+        let Segment {
+            ref bucket_array,
+            ref len,
+        } = self.segments[index];
 
         BucketArrayRef {
             bucket_array,
@@ -1019,9 +1074,18 @@ impl<K, V, S> HashMap<K, V, S> {
     }
 
     #[inline]
-    fn stripe_index_from_hash(&'_ self, hash: u64) -> usize {
-        (hash >> self.stripe_shift) as usize
+    fn segment_index_from_hash(&'_ self, hash: u64) -> usize {
+        if self.segment_shift == 64 {
+            0
+        } else {
+            (hash >> self.segment_shift) as usize
+        }
     }
+}
+
+struct Segment<K, V> {
+    bucket_array: Atomic<BucketArray<K, V>>,
+    len: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -1031,4 +1095,22 @@ mod tests {
     use super::*;
 
     write_test_cases_for_me!(HashMap);
+
+    #[test]
+    fn single_segment() {
+        let map = HashMap::with_num_segments(1);
+
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        assert_eq!(map.insert("foo", 5), None);
+        assert_eq!(map.get("foo"), Some(5));
+
+        assert!(!map.is_empty());
+        assert_eq!(map.len(), 1);
+
+        assert_eq!(map.remove("foo"), Some(5));
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+    }
 }
