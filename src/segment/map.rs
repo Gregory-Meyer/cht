@@ -431,17 +431,11 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
             .get_key_value_and(key, hash, with_entry)
     }
 
-    /// Inserts a key-value pair, then returns a copy of the value previously
-    /// associated with `key`.
+    /// Inserts a key-value pair into the map, returning a clone of the value
+    /// previously corresponding to the key.
     ///
-    /// If the key was not previously present in this hash map, [`None`] is
-    /// returned.
-    ///
-    /// `V` must implement [`Clone`], as other threads may hold references to
-    /// the associated value.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    /// If the map did have this key present, both the key and value are
+    /// updated.
     #[inline]
     pub fn insert(&self, key: K, value: V) -> Option<V>
     where
@@ -450,16 +444,11 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.insert_entry_and(key, value, |_, v| v.clone())
     }
 
-    /// Inserts a key-value pair, then returns a copy of the previous entry.
+    /// Inserts a key-value pair into the map, returning a clone of the
+    /// key-value pair previously corresponding to the supplied key.
     ///
-    /// If the key was not previously present in this hash map, [`None`] is
-    /// returned.
-    ///
-    /// `K` and `V` must implement [`Clone`], as other threads may hold
-    /// references to the entry.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    /// If the map did have this key present, both the key and value are
+    /// updated.
     #[inline]
     pub fn insert_entry(&self, key: K, value: V) -> Option<(K, V)>
     where
@@ -469,13 +458,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.insert_entry_and(key, value, |k, v| (k.clone(), v.clone()))
     }
 
-    /// Inserts a key-value pair, then invokes `with_previous_value` with the
-    /// value previously associated with `key`.
+    /// Inserts a key-value pair into the map, returning the result of invoking
+    /// a function with a reference to the value previously corresponding to the
+    /// key.
     ///
-    /// If the key was not previously present in this hash map, [`None`] is
-    /// returned and `with_previous_value` is not invoked.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    /// If the map did have this key present, both the key and value are
+    /// updated.
     #[inline]
     pub fn insert_and<F: FnOnce(&V) -> T, T>(
         &self,
@@ -486,13 +474,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.insert_entry_and(key, value, move |_, v| with_previous_value(v))
     }
 
-    /// Inserts a key-value pair, then invokes `with_previous_entry` with the
-    /// previous entry.
+    /// Inserts a key-value pair into the map, returning the result of invoking
+    /// a function with a reference to the key-value pair previously
+    /// corresponding to the supplied key.
     ///
-    /// If the key was not previously present in this hash map, [`None`] is
-    /// returned and `with_previous_entry` is not invoked.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    /// If the map did have this key present, both the key and value are
+    /// updated.
     #[inline]
     pub fn insert_entry_and<F: FnOnce(&K, &V) -> T, T>(
         &self,
