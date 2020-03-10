@@ -22,21 +22,17 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Lockfree resizeable concurrent hash table.
+//! Segmented hash tables.
 //!
-//! The hash table in this crate was inspired by
-//! [a blog post by Jeff Phreshing], which describes the implementation of a
-//! hash table in [Junction].
+//! Segmented hash tables are divided into a user-defined number of smaller hash
+//! maps. The most-significant bits of hashed keys are used to select which
+//! segment a key will be inserted to.
 //!
-//! [a blog post by Jeff Phreshing]: https://preshing.com/20160222/a-resizable-concurrent-map/
-//! [Junction]: https://github.com/preshing/junction
+//! Compared to the unsegmented hash table in this crate, the segmented hash
+//! table has better maximum concurrent write throughput for disjoint sets of
+//! keys, but slightly worse read and single-threaded write performance due to
+//! the extra layer of indirection introduced by segmenting.
 
 pub mod map;
-pub mod segment;
-
-#[cfg(test)]
-#[macro_use]
-pub(crate) mod test_util;
 
 pub use map::HashMap;
-pub use segment::HashMap as SegmentedHashMap;
