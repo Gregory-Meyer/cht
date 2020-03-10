@@ -82,7 +82,6 @@ use crossbeam_epoch::Atomic;
 /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
 /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
 /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
-#[derive(Default)]
 pub struct HashMap<K, V, S = DefaultHashBuilder> {
     segments: Box<[Segment<K, V>]>,
     build_hasher: S,
@@ -102,7 +101,7 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// the system has CPUs.
     pub fn new() -> Self {
         Self::with_num_segments_capacity_and_hasher(
-            Self::default_num_segments(),
+            default_num_segments(),
             0,
             DefaultHashBuilder::default(),
         )
@@ -119,14 +118,40 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// the system has CPUs.
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_num_segments_capacity_and_hasher(
-            Self::default_num_segments(),
+            default_num_segments(),
             capacity,
             DefaultHashBuilder::default(),
         )
     }
+}
 
-    fn default_num_segments() -> usize {
-        num_cpus::get() * 2
+#[cfg(feature = "num-cpus")]
+impl<K, V, S: BuildHasher> HashMap<K, V, S> {
+    /// Creates an empty `HashMap` which will use the given hash builder to hash
+    /// keys.
+    ///
+    /// The hash map is initially created with a capacity of 0, so it will not
+    /// allocate bucket pointer arrays until it is first inserted into. However,
+    /// it will always allocate memory for segment pointers and lengths.
+    ///
+    /// The `HashMap` will be created with at least twice as many segments as
+    /// the system has CPUs.
+    pub fn with_hasher(build_hasher: S) -> Self {
+        Self::with_num_segments_capacity_and_hasher(default_num_segments(), 0, build_hasher)
+    }
+
+    /// Creates an empty `HashMap` with the specified capacity, using
+    /// `build_hasher` to hash the keys.
+    ///
+    /// The hash map will be able to hold at least `capacity` elements without
+    /// reallocating any bucket pointer arrays. If `capacity` is 0, the hash map
+    /// will not allocate any bucket pointer arrays. However, it will always
+    /// allocate memory for segment pointers and lengths.
+    ///
+    /// The `HashMap` will be created with at least twice as many segments as
+    /// the system has CPUs.
+    pub fn with_capacity_and_hasher(capacity: usize, build_hasher: S) -> Self {
+        Self::with_num_segments_capacity_and_hasher(default_num_segments(), capacity, build_hasher)
     }
 }
 
@@ -1019,6 +1044,13 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     }
 }
 
+#[cfg(feature = "num-cpus")]
+impl<K, V, S: Default> Default for HashMap<K, V, S> {
+    fn default() -> Self {
+        HashMap::with_num_segments_capacity_and_hasher(default_num_segments(), 0, S::default())
+    }
+}
+
 impl<K, V, S> Drop for HashMap<K, V, S> {
     fn drop(&mut self) {
         let guard = unsafe { &crossbeam_epoch::unprotected() };
@@ -1086,6 +1118,11 @@ impl<K, V, S> HashMap<K, V, S> {
 struct Segment<K, V> {
     bucket_array: Atomic<BucketArray<K, V>>,
     len: AtomicUsize,
+}
+
+#[cfg(feature = "num-cpus")]
+fn default_num_segments() -> usize {
+    num_cpus::get() * 2
 }
 
 #[cfg(test)]
