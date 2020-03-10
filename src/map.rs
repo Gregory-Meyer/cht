@@ -25,12 +25,14 @@
 //! A lockfree concurrent hash map implemented with open addressing and linear
 //! probing.
 
-mod bucket;
+pub(crate) mod bucket;
+pub(crate) mod bucket_array_ref;
 
 #[cfg(test)]
 mod tests;
 
-use bucket::{Bucket, BucketArray, InsertOrModifyState, KeyOrOwnedBucket};
+use bucket::BucketArray;
+use bucket_array_ref::BucketArrayRef;
 
 use std::{
     borrow::Borrow,
@@ -39,7 +41,7 @@ use std::{
 };
 
 use ahash::RandomState;
-use crossbeam_epoch::{self, Atomic, CompareAndSetError, Guard, Owned, Shared};
+use crossbeam_epoch::{self, Atomic};
 
 /// Default hasher for `HashMap`.
 ///
@@ -84,13 +86,13 @@ pub type DefaultHashBuilder = RandomState;
 /// [Junction]: https://github.com/preshing/junction
 /// [this blog post]: https://preshing.com/20160222/a-resizable-concurrent-map/
 #[derive(Default)]
-pub struct HashMap<K: Hash + Eq, V, S: BuildHasher = DefaultHashBuilder> {
+pub struct HashMap<K, V, S = DefaultHashBuilder> {
     bucket_array: Atomic<bucket::BucketArray<K, V>>,
     build_hasher: S,
     len: AtomicUsize,
 }
 
-impl<K: Hash + Eq, V> HashMap<K, V, DefaultHashBuilder> {
+impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// Creates an empty `HashMap`.
     ///
     /// The hash map is created with a capacity of 0 and will not allocate any
@@ -108,7 +110,7 @@ impl<K: Hash + Eq, V> HashMap<K, V, DefaultHashBuilder> {
     }
 }
 
-impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
+impl<K, V, S> HashMap<K, V, S> {
     /// Creates an empty `HashMap` that will use `build_hasher` to hash keys.
     ///
     /// The created map will have a capacity of 0 and as such will not have any
@@ -125,7 +127,10 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         let bucket_array = if capacity == 0 {
             Atomic::null()
         } else {
-            Atomic::new(BucketArray::with_capacity(0, capacity))
+            Atomic::new(BucketArray::with_length(
+                0,
+                (capacity * 2).next_power_of_two(),
+            ))
         };
 
         Self {
@@ -169,7 +174,9 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
             .map(BucketArray::capacity)
             .unwrap_or(0)
     }
+}
 
+impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// Returns a copy of the value corresponding to `key`.
     ///
     /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
@@ -248,40 +255,10 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
-        let guard = &crossbeam_epoch::pin();
-        let current_ref = self.bucket_array(guard);
-        let mut bucket_array_ref = current_ref;
-        let hash = bucket::hash(&self.build_hasher, key);
+        let hash = bucket::hash(&self.build_hasher, &key);
 
-        let result;
-
-        loop {
-            match bucket_array_ref
-                .get(guard, hash, key)
-                .map(|p| unsafe { p.as_ref() })
-            {
-                Ok(Some(Bucket {
-                    key,
-                    maybe_value: value,
-                })) => {
-                    result = Some(with_entry(key, unsafe { &*value.as_ptr() }));
-
-                    break;
-                }
-                Ok(None) => {
-                    result = None;
-
-                    break;
-                }
-                Err(_) => {
-                    bucket_array_ref = bucket_array_ref.rehash(guard, &self.build_hasher);
-                }
-            }
-        }
-
-        self.swing_bucket_array(guard, current_ref, bucket_array_ref);
-
-        result
+        self.bucket_array_ref()
+            .get_key_value_and(key, hash, with_entry)
     }
 
     /// Inserts a key-value pair, then returns a copy of the value previously
@@ -349,51 +326,10 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         value: V,
         with_previous_entry: F,
     ) -> Option<T> {
-        let guard = &crossbeam_epoch::pin();
-        let current_ref = self.bucket_array(guard);
-        let mut bucket_array_ref = current_ref;
         let hash = bucket::hash(&self.build_hasher, &key);
-        let mut bucket_ptr = Owned::new(Bucket::new(key, value));
 
-        let result;
-
-        loop {
-            while self.len.load(Ordering::Relaxed) > bucket_array_ref.capacity() {
-                bucket_array_ref = bucket_array_ref.rehash(guard, &self.build_hasher);
-            }
-
-            match bucket_array_ref.insert(guard, hash, bucket_ptr) {
-                Ok(previous_bucket_ptr) => {
-                    if let Some(previous_bucket_ref) = unsafe { previous_bucket_ptr.as_ref() } {
-                        if previous_bucket_ptr.tag() & bucket::TOMBSTONE_TAG != 0 {
-                            self.len.fetch_add(1, Ordering::Relaxed);
-                            result = None;
-                        } else {
-                            let Bucket {
-                                key,
-                                maybe_value: value,
-                            } = previous_bucket_ref;
-                            result = Some(with_previous_entry(key, unsafe { &*value.as_ptr() }));
-                        }
-
-                        unsafe { bucket::defer_destroy_bucket(guard, previous_bucket_ptr) };
-                    } else {
-                        self.len.fetch_add(1, Ordering::Relaxed);
-                        result = None;
-                    }
-
-                    break;
-                }
-                Err(p) => {
-                    bucket_ptr = p;
-                    bucket_array_ref = bucket_array_ref.rehash(guard, &self.build_hasher);
-                }
-            }
-        }
-
-        self.swing_bucket_array(guard, current_ref, bucket_array_ref);
-
-        result
+        self.bucket_array_ref()
+            .insert_entry_and(key, hash, value, with_previous_entry)
     }
 
     /// If there is a value associated with `key`, remove and return a copy of
@@ -569,47 +505,16 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     >(
         &self,
         key: &Q,
-        mut condition: F,
+        condition: F,
         with_previous_entry: G,
     ) -> Option<T>
     where
         K: Borrow<Q>,
     {
-        let guard = &crossbeam_epoch::pin();
-        let current_ref = self.bucket_array(guard);
-        let mut bucket_array_ref = current_ref;
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        let result;
-
-        loop {
-            match bucket_array_ref.remove_if(guard, hash, key, condition) {
-                Ok(previous_bucket_ptr) => {
-                    if let Some(previous_bucket_ref) = unsafe { previous_bucket_ptr.as_ref() } {
-                        let Bucket {
-                            key,
-                            maybe_value: value,
-                        } = previous_bucket_ref;
-                        self.len.fetch_sub(1, Ordering::Relaxed);
-                        result = Some(with_previous_entry(key, unsafe { &*value.as_ptr() }));
-
-                        unsafe { bucket::defer_destroy_tombstone(guard, previous_bucket_ptr) };
-                    } else {
-                        result = None;
-                    }
-
-                    break;
-                }
-                Err(c) => {
-                    condition = c;
-                    bucket_array_ref = bucket_array_ref.rehash(guard, &self.build_hasher);
-                }
-            }
-        }
-
-        self.swing_bucket_array(guard, current_ref, bucket_array_ref);
-
-        result
+        self.bucket_array_ref()
+            .remove_entry_if_and(key, hash, condition, with_previous_entry)
     }
 
     /// Insert a value if none is associated with `key`. Otherwise, replace the
@@ -820,55 +725,18 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         &self,
         key: K,
         on_insert: F,
-        mut on_modify: G,
+        on_modify: G,
         with_old_entry: H,
     ) -> Option<T> {
-        let guard = &crossbeam_epoch::pin();
-        let current_ref = self.bucket_array(guard);
-        let mut bucket_array_ref = current_ref;
         let hash = bucket::hash(&self.build_hasher, &key);
-        let mut state = InsertOrModifyState::New(key, on_insert);
 
-        let result;
-
-        loop {
-            while self.len.load(Ordering::Relaxed) > bucket_array_ref.capacity() {
-                bucket_array_ref = bucket_array_ref.rehash(guard, &self.build_hasher);
-            }
-
-            match bucket_array_ref.insert_or_modify(guard, hash, state, on_modify) {
-                Ok(previous_bucket_ptr) => {
-                    if let Some(previous_bucket_ref) = unsafe { previous_bucket_ptr.as_ref() } {
-                        if previous_bucket_ptr.tag() & bucket::TOMBSTONE_TAG != 0 {
-                            self.len.fetch_add(1, Ordering::Relaxed);
-                            result = None;
-                        } else {
-                            let Bucket {
-                                key,
-                                maybe_value: value,
-                            } = previous_bucket_ref;
-                            result = Some(with_old_entry(key, unsafe { &*value.as_ptr() }));
-                        }
-
-                        unsafe { bucket::defer_destroy_bucket(guard, previous_bucket_ptr) };
-                    } else {
-                        self.len.fetch_add(1, Ordering::Relaxed);
-                        result = None;
-                    }
-
-                    break;
-                }
-                Err((s, f)) => {
-                    state = s;
-                    on_modify = f;
-                    bucket_array_ref = bucket_array_ref.rehash(guard, &self.build_hasher);
-                }
-            }
-        }
-
-        self.swing_bucket_array(guard, current_ref, bucket_array_ref);
-
-        result
+        self.bucket_array_ref().insert_with_or_modify_entry_and(
+            key,
+            hash,
+            on_insert,
+            on_modify,
+            with_old_entry,
+        )
     }
 
     /// If there is a value associated with `key`, replace it with the result of
@@ -957,112 +825,27 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     pub fn modify_entry_and<F: FnMut(&K, &V) -> V, G: FnOnce(&K, &V) -> T, T>(
         &self,
         key: K,
-        mut on_modify: F,
+        on_modify: F,
         with_old_entry: G,
     ) -> Option<T> {
-        let guard = &crossbeam_epoch::pin();
-        let current_ref = self.bucket_array(guard);
-        let mut bucket_array_ref = current_ref;
         let hash = bucket::hash(&self.build_hasher, &key);
-        let mut key_or_owned_bucket = KeyOrOwnedBucket::Key(key);
 
-        let result;
-
-        loop {
-            match bucket_array_ref.modify(guard, hash, key_or_owned_bucket, on_modify) {
-                Ok(previous_bucket_ptr) => {
-                    if let Some(previous_bucket_ref) = unsafe { previous_bucket_ptr.as_ref() } {
-                        let Bucket {
-                            key,
-                            maybe_value: value,
-                        } = previous_bucket_ref;
-                        result = Some(with_old_entry(key, unsafe { &*value.as_ptr() }));
-
-                        unsafe { bucket::defer_destroy_bucket(guard, previous_bucket_ptr) };
-                    } else {
-                        result = None;
-                    }
-
-                    break;
-                }
-                Err((kb, f)) => {
-                    key_or_owned_bucket = kb;
-                    on_modify = f;
-                    bucket_array_ref = bucket_array_ref.rehash(guard, &self.build_hasher);
-                }
-            }
-        }
-
-        self.swing_bucket_array(guard, current_ref, bucket_array_ref);
-
-        result
+        self.bucket_array_ref()
+            .modify_entry_and(key, hash, on_modify, with_old_entry)
     }
 }
 
-impl<K: Eq + Hash, V, S: BuildHasher> HashMap<K, V, S> {
-    fn bucket_array<'g>(&self, guard: &'g Guard) -> &'g BucketArray<K, V> {
-        const DEFAULT_CAPACITY: usize = 64;
-
-        let mut maybe_new_bucket_array = None;
-
-        loop {
-            let bucket_array_ptr = self.bucket_array.load_consume(guard);
-
-            if let Some(bucket_array_ref) = unsafe { bucket_array_ptr.as_ref() } {
-                return bucket_array_ref;
-            }
-
-            let new_bucket_array = maybe_new_bucket_array
-                .unwrap_or_else(|| Owned::new(BucketArray::with_capacity(0, DEFAULT_CAPACITY)));
-
-            match self.bucket_array.compare_and_set_weak(
-                Shared::null(),
-                new_bucket_array,
-                (Ordering::Release, Ordering::Relaxed),
-                guard,
-            ) {
-                Ok(b) => return unsafe { b.as_ref() }.unwrap(),
-                Err(CompareAndSetError { new, .. }) => maybe_new_bucket_array = Some(new),
-            }
-        }
-    }
-
-    fn swing_bucket_array<'g>(
-        &self,
-        guard: &'g Guard,
-        mut current_ref: &'g BucketArray<K, V>,
-        min_ref: &'g BucketArray<K, V>,
-    ) {
-        let min_epoch = min_ref.epoch;
-
-        let mut current_ptr = (current_ref as *const BucketArray<K, V>).into();
-        let min_ptr: Shared<'g, _> = (min_ref as *const BucketArray<K, V>).into();
-
-        loop {
-            if current_ref.epoch >= min_epoch {
-                return;
-            }
-
-            match self.bucket_array.compare_and_set_weak(
-                current_ptr,
-                min_ptr,
-                (Ordering::Release, Ordering::Relaxed),
-                guard,
-            ) {
-                Ok(_) => unsafe { bucket::defer_acquire_destroy(guard, current_ptr) },
-                Err(_) => {
-                    let new_ptr = self.bucket_array.load_consume(guard);
-                    assert!(!new_ptr.is_null());
-
-                    current_ptr = new_ptr;
-                    current_ref = unsafe { new_ptr.as_ref() }.unwrap();
-                }
-            }
+impl<K, V, S> HashMap<K, V, S> {
+    fn bucket_array_ref(&'_ self) -> BucketArrayRef<'_, K, V, S> {
+        BucketArrayRef {
+            bucket_array: &self.bucket_array,
+            build_hasher: &self.build_hasher,
+            len: &self.len,
         }
     }
 }
 
-impl<K: Eq + Hash, V, S: BuildHasher> Drop for HashMap<K, V, S> {
+impl<K, V, S> Drop for HashMap<K, V, S> {
     fn drop(&mut self) {
         let guard = unsafe { &crossbeam_epoch::unprotected() };
         atomic::fence(Ordering::Acquire);
