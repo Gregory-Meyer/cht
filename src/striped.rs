@@ -22,17 +22,6 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Lockfree resizeable concurrent hash table.
-//!
-//! The hash table in this crate was inspired by
-//! [a blog post by Jeff Phreshing], which describes the implementation of a
-//! hash table in [Junction].
-//!
-//! [a blog post by Jeff Phreshing]: https://preshing.com/20160222/a-resizable-concurrent-map/
-//! [Junction]: https://github.com/preshing/junction
-
 pub mod map;
-pub mod striped;
 
 pub use map::HashMap;
-pub use striped::HashMap as StripedHashMap;
