@@ -82,7 +82,6 @@ use crossbeam_epoch::Atomic;
 /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
 /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
 /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
-#[derive(Default)]
 pub struct HashMap<K, V, S = DefaultHashBuilder> {
     segments: Box<[Segment<K, V>]>,
     build_hasher: S,
@@ -1042,6 +1041,13 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
 
         self.bucket_array_ref(hash)
             .modify_entry_and(key, hash, on_modify, with_old_entry)
+    }
+}
+
+#[cfg(feature = "num-cpus")]
+impl<K, V, S: Default> Default for HashMap<K, V, S> {
+    fn default() -> Self {
+        HashMap::with_num_segments_capacity_and_hasher(default_num_segments(), 0, S::default())
     }
 }
 
