@@ -10,7 +10,7 @@ license = "MIT"
 
 [features]
 default = ["num_cpus"]
-num-cpus = ["num_cpus"]
+num-cpus = ["num-cpus"]
 
 [dependencies]
 ahash = "^0.3.2"

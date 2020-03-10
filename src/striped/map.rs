@@ -95,8 +95,8 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     pub fn new() -> Self {
         Self::with_stripes_capacity_and_hasher(
             Self::default_num_stripes(),
-            DefaultHashBuilder::default(),
             0,
+            DefaultHashBuilder::default(),
         )
     }
 
@@ -111,8 +111,8 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_stripes_capacity_and_hasher(
             Self::default_num_stripes(),
-            DefaultHashBuilder::default(),
             capacity,
+            DefaultHashBuilder::default(),
         )
     }
 
@@ -127,7 +127,7 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// Each submap will have a capacity of 0 and will require a table to be
     /// allocated upon the first insertion into that submap.
     pub fn with_stripes(num_stripes: usize) -> Self {
-        Self::with_stripes_capacity_and_hasher(num_stripes, DefaultHashBuilder::default(), 0)
+        Self::with_stripes_capacity_and_hasher(num_stripes, 0, DefaultHashBuilder::default())
     }
 
     /// Creates an empty `HashMap` with at least `num_stripes` submaps and
@@ -137,7 +137,7 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// If `capacity == 0`, no submaps will be allocated, but space to hold
     /// submap pointers and lengths will be allocated.
     pub fn with_stripes_and_capacity(num_stripes: usize, capacity: usize) -> Self {
-        Self::with_stripes_capacity_and_hasher(num_stripes, DefaultHashBuilder::default(), capacity)
+        Self::with_stripes_capacity_and_hasher(num_stripes, capacity, DefaultHashBuilder::default())
     }
 }
 
@@ -148,7 +148,7 @@ impl<K, V, S> HashMap<K, V, S> {
     /// Each submap will have a capacity of 0 and will require a table to be
     /// allocated upon the first insertion into that submap.
     pub fn with_stripes_and_hasher(num_stripes: usize, build_hasher: S) -> Self {
-        Self::with_stripes_capacity_and_hasher(num_stripes, build_hasher, 0)
+        Self::with_stripes_capacity_and_hasher(num_stripes, 0, build_hasher)
     }
 
     /// Creates an empty `HashMap` that will use `build_hasher` to hash keys,
@@ -159,8 +159,8 @@ impl<K, V, S> HashMap<K, V, S> {
     /// submap pointers and lengths will be allocated.
     pub fn with_stripes_capacity_and_hasher(
         num_stripes: usize,
-        build_hasher: S,
         capacity: usize,
+        build_hasher: S,
     ) -> Self {
         assert!(num_stripes > 0);
 
