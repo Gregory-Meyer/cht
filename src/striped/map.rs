@@ -427,12 +427,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ) -> Option<T> {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref(hash)
-            .insert_entry_and(key, hash, value, move |k, v| {
-                self.len.fetch_add(1, Ordering::Relaxed);
+        let result =
+            self.bucket_array_ref(hash)
+                .insert_entry_and(key, hash, value, with_previous_entry);
 
-                with_previous_entry(k, v)
-            })
+        if result.is_none() {
+            self.len.fetch_add(1, Ordering::Relaxed);
+        }
+
+        result
     }
 
     /// If there is a value associated with `key`, remove and return a copy of
@@ -853,17 +856,19 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ) -> Option<T> {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref(hash).insert_with_or_modify_entry_and(
+        let result = self.bucket_array_ref(hash).insert_with_or_modify_entry_and(
             key,
             hash,
             on_insert,
             on_modify,
-            move |k, v| {
-                self.len.fetch_add(1, Ordering::Relaxed);
+            with_old_entry,
+        );
 
-                with_old_entry(k, v)
-            },
-        )
+        if result.is_none() {
+            self.len.fetch_add(1, Ordering::Relaxed);
+        }
+
+        result
     }
 
     /// If there is a value associated with `key`, replace it with the result of
@@ -1017,4 +1022,13 @@ impl<K, V, S> HashMap<K, V, S> {
     fn stripe_index_from_hash(&'_ self, hash: u64) -> usize {
         (hash >> self.stripe_shift) as usize
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::write_test_cases_for_me;
+
+    use super::*;
+
+    write_test_cases_for_me!(HashMap);
 }

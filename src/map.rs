@@ -28,9 +28,6 @@
 pub(crate) mod bucket;
 pub(crate) mod bucket_array_ref;
 
-#[cfg(test)]
-mod tests;
-
 use bucket::BucketArray;
 use bucket_array_ref::BucketArrayRef;
 
@@ -903,4 +900,13 @@ impl<K, V, S> Drop for HashMap<K, V, S> {
             current_ptr = next_ptr;
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::write_test_cases_for_me;
+
+    use super::*;
+
+    write_test_cases_for_me!(HashMap);
 }

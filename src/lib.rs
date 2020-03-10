@@ -34,5 +34,9 @@
 pub mod map;
 pub mod striped;
 
+#[cfg(test)]
+#[macro_use]
+pub(crate) mod test_util;
+
 pub use map::HashMap;
 pub use striped::HashMap as StripedHashMap;
