@@ -700,18 +700,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
             })
     }
 
-    /// Insert a value if none is associated with `key`. Otherwise, replace the
-    /// value with the result of `on_modify` with the current entry as
-    /// arguments. Finally, return a copy of the previously associated value.
+    /// If no value corresponds to the key, insert a new key-value pair into
+    /// the map. Otherwise, modify the existing value and return a clone of the
+    /// value previously corresponding to the key.
     ///
-    /// If there is no value associated with `key`, [`None`] will be returned.
-    /// `on_modify` may be invoked multiple times, even if [`None`] is returned.
+    /// `on_modify` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
     ///
-    /// `V` must implement [`Clone`], as other threads may hold references to
-    /// the associated value.
-    ///
+    /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     #[inline]
     pub fn insert_or_modify<F: FnMut(&K, &V) -> V>(
         &self,
@@ -725,18 +722,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.insert_with_or_modify_entry_and(key, move || value, on_modify, |_, v| v.clone())
     }
 
-    /// Insert a value if none is associated with `key`. Otherwise, replace the
-    /// value with the result of `on_modify` with the current entry as
-    /// arguments. Finally, return a copy of the previous entry.
+    /// If no value corresponds to the key, insert a new key-value pair into
+    /// the map. Otherwise, modify the existing value and return a clone of the
+    /// key-value pair previously corresponding to the key.
     ///
-    /// If there is no value associated with `key`, [`None`] will be returned.
-    /// `on_modify` may be invoked multiple times, even if [`None`] is returned.
+    /// `on_modify` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
     ///
-    /// `K` and `V` must implement [`Clone`], as other threads may hold
-    /// references to the entry.
-    ///
+    /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     #[inline]
     pub fn insert_or_modify_entry<F: FnMut(&K, &V) -> V>(
         &self,
@@ -756,22 +750,17 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         )
     }
 
-    /// Insert the result of `on_insert` if no value is associated with `key`.
-    /// Otherwise, replace the value with the result of `on_modify` with the
-    /// current entry as arguments. Finally, return a copy of the previously
-    /// associated value.
+    /// If no value corresponds to the key, invoke a default function to insert
+    /// a new key-value pair into the map. Otherwise, modify the existing value
+    /// and return a clone of the value previously corresponding to the key.
     ///
-    /// If there is no value associated with `key`, `on_insert` will be invoked
-    /// and [`None`] will be returned. `on_modify` may be invoked multiple
-    /// times, even if [`None`] is returned. Similarly, `on_insert` may be
-    /// invoked if [`Some`] is returned.
+    /// `on_insert` may be invoked, even if [`None`] is returned.
     ///
-    /// `V` must implement [`Clone`], as other threads may hold references to
-    /// the associated value.
+    /// `on_modify` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
     ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     #[inline]
     pub fn insert_with_or_modify<F: FnOnce() -> V, G: FnMut(&K, &V) -> V>(
         &self,
@@ -785,22 +774,18 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.insert_with_or_modify_entry_and(key, on_insert, on_modify, |_, v| v.clone())
     }
 
-    /// Insert the result of `on_insert` if no value is associated with `key`.
-    /// Otherwise, replace the value with the result of `on_modify` with the
-    /// current entry as arguments. Finally, return a copy of the previous
-    /// entry.
+    /// If no value corresponds to the key, invoke a default function to insert
+    /// a new key-value pair into the map. Otherwise, modify the existing value
+    /// and return a clone of the key-value pair previously corresponding to the
+    /// key.
     ///
-    /// If there is no value associated with `key`, `on_insert` will be invoked
-    /// and [`None`] will be returned. `on_modify` may be invoked multiple
-    /// times, even if [`None`] is returned. Similarly, `on_insert` may be
-    /// invoked if [`Some`] is returned.
+    /// `on_insert` may be invoked, even if [`None`] is returned.
     ///
-    /// `K` and `V` must implement [`Clone`], as other threads may hold
-    /// references to the entry.
+    /// `on_modify` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
     ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     #[inline]
     pub fn insert_with_or_modify_entry<F: FnOnce() -> V, G: FnMut(&K, &V) -> V>(
         &self,
@@ -817,15 +802,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         })
     }
 
-    /// Insert a value if none is associated with `key`. Otherwise, replace the
-    /// value with the result of `on_modify` with the current entry as
-    /// arguments. Finally, return the result of invoking `with_old_value` with
-    /// the previously associated value.
+    /// If no value corresponds to the key, insert a new key-value pair into
+    /// the map. Otherwise, modify the existing value and return the result of
+    /// invoking a function with a reference to the value previously
+    /// corresponding to the key.
     ///
-    /// If there is no value associated with `key`, `with_old_value` will not be
-    /// invoked and [`None`] will be returned. `on_modify` may be invoked
-    /// multiple times, even if [`None`] is returned.
+    /// `on_modify` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
     ///
+    /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     #[inline]
     pub fn insert_or_modify_and<F: FnMut(&K, &V) -> V, G: FnOnce(&V) -> T, T>(
@@ -843,15 +828,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         )
     }
 
-    /// Insert a value if none is associated with `key`. Otherwise, replace the
-    /// value with the result of `on_modify` with the current entry as
-    /// arguments. Finally, return the result of invoking `with_old_entry` with
-    /// the previous entry.
+    /// If no value corresponds to the key, insert a new key-value pair into
+    /// the map. Otherwise, modify the existing value and return the result of
+    /// invoking a function with a reference to the key-value pair previously
+    /// corresponding to the supplied key.
     ///
-    /// If there is no value associated with `key`, `with_old_value` will not be
-    /// invoked and [`None`] will be returned. `on_modify` may be invoked
-    /// multiple times, even if [`None`] is returned.
+    /// `on_modify` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
     ///
+    /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     #[inline]
     pub fn insert_or_modify_entry_and<F: FnMut(&K, &V) -> V, G: FnOnce(&K, &V) -> T, T>(
@@ -864,18 +849,18 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.insert_with_or_modify_entry_and(key, move || value, on_modify, with_old_entry)
     }
 
-    /// Insert the result of `on_insert` if no value is associated with `key`.
-    /// Otherwise, replace the value with the result of `on_modify` with the
-    /// current entry as arguments. Finally, return the result of invoking
-    /// `with_old_value` with the previously associated value.
+    /// If no value corresponds to the key, invoke a default function to insert
+    /// a new key-value pair into the map. Otherwise, modify the existing value
+    /// and return the result of invoking a function with a reference to the
+    /// value previously corresponding to the key.
     ///
-    /// If there is no value associated with `key`, `on_insert` will be invoked,
-    /// `with_old_value` will not be invoked, and [`None`] will be returned.
-    /// `on_modify` may be invoked multiple times, even if [`None`] is returned.
-    /// Similarly, `on_insert` may be invoked if [`Some`] is returned.
+    /// `on_insert` may be invoked, even if [`None`] is returned.
     ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    /// `on_modify` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
+    ///
     /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     #[inline]
     pub fn insert_with_or_modify_and<
         F: FnOnce() -> V,
@@ -894,18 +879,18 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         })
     }
 
-    /// Insert the result of `on_insert` if no value is associated with `key`.
-    /// Otherwise, replace the value with the result of `on_modify` with the
-    /// current entry as arguments. Finally, return the result of invoking
-    /// `with_old_entry` with the previous entry.
+    /// If no value corresponds to the key, invoke a default function to insert
+    /// a new key-value pair into the map. Otherwise, modify the existing value
+    /// and return the result of invoking a function with a reference to the
+    /// key-value pair previously corresponding to the supplied key.
     ///
-    /// If there is no value associated with `key`, `on_insert` will be invoked,
-    /// `with_old_value` will not be invoked, and [`None`] will be returned.
-    /// `on_modify` may be invoked multiple times, even if [`None`] is returned.
-    /// Similarly, `on_insert` may be invoked if [`Some`] is returned.
+    /// `on_insert` may be invoked, even if [`None`] is returned.
     ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    /// `on_modify` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
+    ///
     /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     #[inline]
     pub fn insert_with_or_modify_entry_and<
         F: FnOnce() -> V,
