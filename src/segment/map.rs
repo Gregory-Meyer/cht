@@ -104,9 +104,9 @@ pub struct HashMap<K, V, S = DefaultHashBuilder> {
 impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// Creates an empty `HashMap`.
     ///
-    /// The hash map is created with a capacity of 0 and no memory for segments
-    /// will be allocated until the first insertion to each segment. However,
-    /// memory will always be allocated to store segment pointers and lengths.
+    /// The hash map is initially created with a capacity of 0, so it will not
+    /// allocate bucket pointer arrays until it is first inserted into. However,
+    /// it will always allocate memory for segment pointers and lengths.
     ///
     /// The `HashMap` will be created with at least twice as many segments as
     /// the system has CPUs.
@@ -118,12 +118,12 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
         )
     }
 
-    /// Creates an empty `HashMap` with space for at least `capacity` elements
-    /// without reallocating.
+    /// Creates an empty `HashMap` with the specified capacity.
     ///
-    /// If `capacity == 0`, no memory for segments will be allocated until the
-    /// first insertion to each segment. However, memory will always be
-    /// allocated to store segment pointers and lengths.
+    /// The hash map will be able to hold at least `capacity` elements without
+    /// reallocating any bucket pointer arrays. If `capacity` is 0, the hash map
+    /// will not allocate any bucket pointer arrays. However, it will always
+    /// allocate memory for segment pointers and lengths.
     ///
     /// The `HashMap` will be created with at least twice as many segments as
     /// the system has CPUs.
@@ -167,30 +167,30 @@ impl<K, V, S: BuildHasher> HashMap<K, V, S> {
 }
 
 impl<K, V> HashMap<K, V, DefaultHashBuilder> {
-    /// Creates an empty `HashMap` with at least `num_segments` segments.
+    /// Creates an empty `HashMap` with the specified number of segments.
     ///
-    /// The hash map is created with a capacity of 0 and no memory for segments
-    /// will be allocated until the first insertion to each segment. However,
-    /// memory will always be allocated to store segment pointers and lengths.
+    /// The hash map is initially created with a capacity of 0, so it will not
+    /// allocate bucket pointer arrays until it is first inserted into. However,
+    /// it will always allocate memory for segment pointers and lengths.
     ///
     /// # Panics
     ///
-    /// Panics if `num_segments == 0`.
+    /// Panics if `num_segments` is 0.
     pub fn with_num_segments(num_segments: usize) -> Self {
         Self::with_num_segments_capacity_and_hasher(num_segments, 0, DefaultHashBuilder::default())
     }
 
-    /// Creates an empty `HashMap` with at least `num_segments` segments and
-    /// space for at least `capacity` elements in each segment without
-    /// reallocating.
+    /// Creates an empty `HashMap` with the specified number of segments and
+    /// capacity.
     ///
-    /// If `capacity == 0`, no memory for segments will be allocated until the
-    /// first insertion to each segment. However, memory will always be
-    /// allocated to store segment pointers and lengths.
+    /// The hash map will be able to hold at least `capacity` elements without
+    /// reallocating any bucket pointer arrays. If `capacity` is 0, the hash map
+    /// will not allocate any bucket pointer arrays. However, it will always
+    /// allocate memory for segment pointers and lengths.
     ///
     /// # Panics
     ///
-    /// Panics if `num_segments == 0`.
+    /// Panics if `num_segments` is 0.
     pub fn with_num_segments_and_capacity(num_segments: usize, capacity: usize) -> Self {
         Self::with_num_segments_capacity_and_hasher(
             num_segments,
@@ -201,31 +201,31 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
 }
 
 impl<K, V, S> HashMap<K, V, S> {
-    /// Creates an empty `HashMap` that will use `build_hasher` to hash keys
-    /// with at least `num_segments` segments.
+    /// Creates an empty `HashMap` with the specified number of segments, using
+    /// `build_hasher` to hash the keys.
     ///
-    /// The hash map is created with a capacity of 0 and no memory for segments
-    /// will be allocated until the first insertion to each segment. However,
-    /// memory will always be allocated to store segment pointers and lengths.
+    /// The hash map is initially created with a capacity of 0, so it will not
+    /// allocate bucket pointer arrays until it is first inserted into. However,
+    /// it will always allocate memory for segment pointers and lengths.
     ///
     /// # Panics
     ///
-    /// Panics if `num_segments == 0`.
+    /// Panics if `num_segments` is 0.
     pub fn with_num_segments_and_hasher(num_segments: usize, build_hasher: S) -> Self {
         Self::with_num_segments_capacity_and_hasher(num_segments, 0, build_hasher)
     }
 
-    /// Creates an empty `HashMap` that will use `build_hasher` to hash keys,
-    /// hold at least `capacity` elements without reallocating, and have at
-    /// least `num_segments` segments.
+    /// Creates an empty `HashMap` with the specified number of segments and
+    /// capacity, using `build_hasher` to hash the keys.
     ///
-    /// If `capacity == 0`, no memory for segments will be allocated until the
-    /// first insertion to each segment. However, memory will always be
-    /// allocated to store segment pointers and lengths.
+    /// The hash map will be able to hold at least `capacity` elements without
+    /// reallocating any bucket pointer arrays. If `capacity` is 0, the hash map
+    /// will not allocate any bucket pointer arrays. However, it will always
+    /// allocate memory for segment pointers and lengths.
     ///
     /// # Panics
     ///
-    /// Panics if `num_segments == 0`.
+    /// Panics if `num_segments` is 0.
     pub fn with_num_segments_capacity_and_hasher(
         num_segments: usize,
         capacity: usize,
