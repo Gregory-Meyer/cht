@@ -22,8 +22,8 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Lockfree concurrent segmented hash map implemented with open addressing and
-//! linear probing.
+//! A lockfree hash map implemented with segmented bucket pointer arrays, open
+//! addressing, and linear probing.
 
 use crate::map::{
     bucket::{self, BucketArray},
@@ -40,48 +40,59 @@ use std::{
 
 use crossbeam_epoch::Atomic;
 
-/// Lockfree concurrent segmented hash map implemented with open addressing and
-/// linear probing.
+/// A lockfree hash map implemented with segmented bucket pointer arrays, open
+/// addressing, and linear probing.
 ///
-/// The default hashing algorithm is [aHash], a hashing algorithm that is
-/// accelerated by the [AES-NI] instruction set on x86 proessors. aHash provides
-/// some resistance to DoS attacks, but will not provide the same level of
-/// resistance as something like [`RandomState`].
+/// The default hashing algorithm is currently [`AHash`], though this is
+/// subject to change at any point in the future. This hash function is very
+/// fast for all types of keys, but this algorithm will typically *not* protect
+/// against attacks such as HashDoS.
 ///
-/// The hashing algorithm to be used can be chosen on a per-`HashMap` basis
-/// using the [`with_hasher`], [`with_capacity_and_hasher`], and
-/// [`with_num_segments_capacity_and_hasher`] methods.
+/// The hashing algorithm can be replaced on a per-`HashMap` basis using the
+/// [`default`], [`with_hasher`], [`with_capacity_and_hasher`],
+/// [`with_num_segments_and_hasher`], and
+/// [`with_num_segments_capacity_and_hasher`] methods. Many alternative
+/// algorithms are available on crates.io, such as the [`fnv`] crate.
 ///
-/// This map is segmented using the most-significant bits of hashed keys,
-/// meaning that entries are spread across several smaller hash maps (segments).
-/// Changing the number of segments in a map after construction is not
-/// supported.
-///
-/// The minimum number of segments can be specified as a parameter to
+/// The number of segments can be specified on a per-`HashMap` basis using the
 /// [`with_num_segments`], [`with_num_segments_and_capacity`],
 /// [`with_num_segments_and_hasher`], and
-/// [`with_num_segments_capacity_and_hasher`]. By default, the `num-cpus`
-/// feature is enabled and [`new`] and [`with_capacity`] will create maps with
-/// at least twice as many segments as the system has CPUs.
+/// [`with_num_segments_capacity_and_hasher`] methods. By default, the
+/// `num-cpus` feature is enabled and [`new`], [`with_capacity`],
+/// [`with_hasher`], and [`with_capacity_and_hasher`] will create maps with
+/// twice as many segments as the system has CPUs.
 ///
-/// Key types must implement [`Hash`] and [`Eq`]. Any operations that return a
-/// key or value require the return types to implement [`Clone`], as elements
-/// may be in use by other threads and as such cannot be moved from.
+/// It is required that the keys implement the [`Eq`] and [`Hash`] traits,
+/// although this can frequently be achieved by using
+/// `#[derive(PartialEq, Eq, Hash)]`. If you implement these yourself, it is
+/// important that the following property holds:
 ///
-/// [`new`]: #method.new
+/// ```text
+/// k1 == k2 -> hash(k1) == hash(k2)
+/// ```
+///
+/// In other words, if two keys are equal, their hashes must be equal.
+///
+/// It is a logic error for a key to be modified in such a way that the key's
+/// hash, as determined by the [`Hash`] trait, or its equality, as determined by
+/// the [`Eq`] trait, changes while it is in the map. This is normally only
+/// possible through [`Cell`], [`RefCell`], global state, I/O, or unsafe code.
+///
+/// [`AHash`]: https://crates.io/crates/ahash
+/// [`fnv`]: https://crates.io/crates/fnv
+/// [`default`]: #method.default
+/// [`with_hasher`]: #method.with_hasher
 /// [`with_capacity`]: #method.with_capacity
-/// [`with_num_segments`]: #method.with_num_segments
-/// [`with_num_segments_and_capacity`]: #method.with_num_segments_and_capacity
+/// [`with_capacity_and_hasher`]: #method.with_capacity_and_hasher
 /// [`with_num_segments_and_hasher`]: #method.with_num_segments_and_hasher
 /// [`with_num_segments_capacity_and_hasher`]: #method.with_num_segments_capacity_and_hasher
-/// [aHash]: https://docs.rs/ahash
-/// [AES-NI]: https://en.wikipedia.org/wiki/AES_instruction_set
-/// [`RandomState`]: https://doc.rust-lang.org/std/collections/hash_map/struct.RandomState.html
-/// [`with_hasher`]: #method.with_hasher
-/// [`with_capacity_and_hasher`]: #method.with_capacity_and_hasher
-/// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+/// [`with_num_segments`]: #method.with_num_segments
+/// [`with_num_segments_and_capacity`]: #method.with_num_segments_and_capacity
+/// [`new`]: #method.new
 /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-/// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+/// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
+/// [`Cell`]: https://doc.rust-lang.org/std/cell/struct.Ref.html
+/// [`RefCell`]: https://doc.rust-lang.org/std/cell/struct.RefCell.html
 pub struct HashMap<K, V, S = DefaultHashBuilder> {
     segments: Box<[Segment<K, V>]>,
     build_hasher: S,
