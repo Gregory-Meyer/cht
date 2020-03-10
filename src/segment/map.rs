@@ -351,15 +351,14 @@ impl<K, V, S: BuildHasher> HashMap<K, V, S> {
 }
 
 impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
-    /// Returns a copy of the value associated with `key`.
+    /// Returns a clone of the value corresponding to the key.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`. `V` must implement [`Clone`], as other threads
-    /// may hold references to the associated value.
+    /// The key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for
+    /// the key type.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     #[inline]
     pub fn get<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<V>
     where
@@ -369,15 +368,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.get_key_value_and(key, |_, v| v.clone())
     }
 
-    /// Returns a copy of the key and value associated with `key`.
+    /// Returns a clone of the the key-value pair corresponding to the supplied
+    /// key.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`. `K` and `V` must implement [`Clone`], as other
-    /// threads may hold references to the entry.
+    /// The supplied key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for the key
+    /// type.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     #[inline]
     pub fn get_key_value<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<(K, V)>
     where
@@ -387,15 +386,13 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.get_key_value_and(key, |k, v| (k.clone(), v.clone()))
     }
 
-    /// Invokes `with_value` with a reference to the value associated with `key`.
+    /// Returns the result of invoking a function with a reference to the value
+    /// corresponding to the key.
     ///
-    /// If there is no value associated with `key` in the map, `with_value` will
-    /// not be invoked and [`None`] will be returned.
+    /// The key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for
+    /// the key type.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     #[inline]
@@ -410,16 +407,13 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.get_key_value_and(key, move |_, v| with_value(v))
     }
 
-    /// Invokes `with_entry` with a reference to the key and value associated
-    /// with `key`.
+    /// Returns the result of invoking a function with a reference to the
+    /// key-value pair corresponding to the supplied key.
     ///
-    /// If there is no value associated with `key` in the map, `with_entry` will
-    /// not be invoked and [`None`] will be returned.
+    /// The supplied key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for the key
+    /// type.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     #[inline]
