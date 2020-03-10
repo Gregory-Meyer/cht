@@ -579,21 +579,20 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, |_, _| true, with_previous_entry)
     }
 
-    /// If there is a value associated with `key` and `condition` returns true
-    /// when invoked with the current entry, remove and return a copy of its
-    /// value.
+    /// Removes a key from the map if a condition is met, returning a clone of
+    /// the value previously corresponding to the key.
     ///
-    /// `condition` may be invoked one or more times, even if no entry was
-    /// removed.
+    /// `condition` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`. `K` and `V` must implement [`Clone`], as other
-    /// threads may hold references to the entry.
+    /// The key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for
+    /// the key type.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
-    #[inline]
+    /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     pub fn remove_if<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool>(
         &self,
         key: &Q,
@@ -606,19 +605,20 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, condition, move |_, v| v.clone())
     }
 
-    /// If there is a value associated with `key` and `condition` returns true
-    /// when invoked with the current entry, remove and return a copy of it.
+    /// Removes a key from the map if a condition is met, returning a clone of
+    /// the key-value pair previously corresponding to the key.
     ///
-    /// `condition` may be invoked one or more times, even if no entry was
-    /// removed.
+    /// `condition` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`. `K` and `V` must implement [`Clone`], as other
-    /// threads may hold references to the entry.
+    /// The key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for
+    /// the key type.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
+    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     #[inline]
     pub fn remove_entry_if<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool>(
         &self,
@@ -632,19 +632,20 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, condition, move |k, v| (k.clone(), v.clone()))
     }
 
-    /// If there is a value associated with `key` and `condition` returns true
-    /// when invoked with the current entry, remove it and return the result of
-    /// invoking `with_previous_value` with its value.
+    /// Remove a key from the map if a condition is met, returning the result of
+    /// invoking a function with a reference to the value previously
+    /// corresponding to the key.
     ///
-    /// `condition` may be invoked one or more times, even if no entry was
-    /// removed. If `condition` failed or there was no value associated with
-    /// `key`, `with_previous_entry` is not invoked and [`None`] is returned.
+    /// `condition` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`.
+    /// The key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for
+    /// the key type.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     #[inline]
     pub fn remove_if_and<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool, G: FnOnce(&V) -> T, T>(
@@ -659,19 +660,20 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, condition, move |_, v| with_previous_value(v))
     }
 
-    /// If there is a value associated with `key` and `condition` returns true
-    /// when invoked with the current entry, remove it and return the result of
-    /// invoking `with_previous_entry` with it.
+    /// Removes a key from the map if a condition is met, returning the result
+    /// of invoking a function with a reference to the key-value pair previously
+    /// corresponding to the key.
     ///
-    /// `condition` may be invoked one or more times, even if no entry was
-    /// removed. If `condition` failed or there was no value associated with
-    /// `key`, `with_previous_entry` is not invoked and [`None`] is returned.
+    /// `condition` will be invoked at least once if [`Some`] is returned. It
+    /// may also be invoked one or more times if [`None`] is returned.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`.
+    /// The key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for
+    /// the key type.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     #[inline]
     pub fn remove_entry_if_and<
