@@ -31,7 +31,7 @@ use crate::map::{
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{self, AtomicUsize, Ordering},
 };
 
 use crossbeam_epoch::Atomic;
@@ -933,6 +933,39 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
 
         self.bucket_array_ref(hash)
             .modify_entry_and(key, hash, on_modify, with_old_entry)
+    }
+}
+
+impl<K, V, S> Drop for HashMap<K, V, S> {
+    fn drop(&mut self) {
+        let guard = unsafe { &crossbeam_epoch::unprotected() };
+        atomic::fence(Ordering::Acquire);
+
+        for (this_bucket_array, _) in self.stripes.iter() {
+            let mut current_ptr = this_bucket_array.load(Ordering::Relaxed, guard);
+
+            while let Some(current_ref) = unsafe { current_ptr.as_ref() } {
+                let next_ptr = current_ref.next.load(Ordering::Relaxed, guard);
+
+                for this_bucket_ptr in current_ref
+                    .buckets
+                    .iter()
+                    .map(|b| b.load(Ordering::Relaxed, guard))
+                    .filter(|p| !p.is_null())
+                    .filter(|p| next_ptr.is_null() || p.tag() & bucket::TOMBSTONE_TAG == 0)
+                {
+                    // only delete tombstones from the newest bucket array
+                    // the only way this becomes a memory leak is if there was a panic during a rehash,
+                    // in which case i'm going to say that running destructors and freeing memory is
+                    // best-effort, and my best effort is to not do it
+                    unsafe { bucket::defer_acquire_destroy(guard, this_bucket_ptr) };
+                }
+
+                unsafe { bucket::defer_acquire_destroy(guard, current_ptr) };
+
+                current_ptr = next_ptr;
+            }
+        }
     }
 }
 
