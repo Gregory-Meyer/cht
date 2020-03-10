@@ -1,6 +1,6 @@
 [package]
 name = "cht"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Gregory Meyer <me@gregjm.dev>"]
 edition = "2018"
 description = "Lockfree resizeable concurrent hash table."
