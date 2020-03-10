@@ -284,14 +284,11 @@ impl<K, V, S> HashMap<K, V, S> {
         self.len() == 0
     }
 
-    /// Returns the number of elements the map can hold without reallocating a
-    /// bucket pointer array.
+    /// Returns the number of elements the map can hold without reallocating any
+    /// bucket pointer arrays.
     ///
-    /// As the map is composed of multiple separately allocated segments, this
-    /// method returns the minimum capacity of all segments.
-    ///
-    /// Note that all mutating operations, with the exception of removing
-    /// elements, will result in an allocation for a new bucket.
+    /// Note that all mutating operations except removal will result in a bucket
+    /// being allocated or reallocated.
     ///
     /// # Safety
     ///
