@@ -22,39 +22,32 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! A lockfree concurrent hash map implemented with open addressing and linear
-//! probing.
-
-pub(crate) mod bucket;
-pub(crate) mod bucket_array_ref;
-
-use bucket::BucketArray;
-use bucket_array_ref::BucketArrayRef;
+use crate::map::{
+    bucket::{self, BucketArray},
+    bucket_array_ref::BucketArrayRef,
+    DefaultHashBuilder,
+};
 
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash},
+    ptr,
     sync::atomic::{self, AtomicUsize, Ordering},
 };
 
-use ahash::RandomState;
-use crossbeam_epoch::{self, Atomic};
+use crossbeam_epoch::Atomic;
 
-/// Default hasher for `HashMap`.
+/// Lockfree concurrent hash map implemented with submap striping, open
+/// addressing, and linear probing.
 ///
-/// This is currently [aHash], a hashing algorithm designed around acceleration
-/// by the [AES-NI] instruction set on x86 processors. aHash is not
-/// cryptographically secure, but is fast and resistant to DoS attacks. Compared
-/// to [Fx Hash], the previous default hasher, aHash is slower at hashing
-/// integers, faster at hashing strings, and provides DoS attack resistance.
-///
-/// [aHash]: https://docs.rs/ahash
-/// [AES-NI]: https://en.wikipedia.org/wiki/AES_instruction_set
-/// [Fx Hash]: https://docs.rs/fxhash
-pub type DefaultHashBuilder = RandomState;
-
-/// A lockfree concurrent hash map implemented with open addressing and linear
-/// probing.
+/// This map is striped using the high bits of key hashes, meaning that entries
+/// are spread across multiple sub hash maps (submaps). By default, the
+/// `num-cpus` feature is enabled and [`new`] and [`with_capacity`] will create
+/// hash tables with at least as many submaps as the system has CPUs. Otherwise,
+/// the user can specify the desired minimum number of submaps as parameters to
+/// [`with_stripes`], [`with_stripes_and_capacity`],
+/// [`with_stripes_and_hasher`], and [`with_stripes_capacity_and_hasher`]. The
+/// actual number of submaps is always a power of two.
 ///
 /// The default hashing algorithm is [aHash], a hashing algorithm that is
 /// accelerated by the [AES-NI] instruction set on x86 proessors. aHash provides
@@ -68,10 +61,12 @@ pub type DefaultHashBuilder = RandomState;
 /// key or value require the return types to implement [`Clone`], as elements
 /// may be in use by other threads and as such cannot be moved from.
 ///
-/// `HashMap` is inspired by Jeff Phreshing's hash tables implemented in
-/// [Junction], described in [this blog post]. In short, `HashMap` supports
-/// fully concurrent lookups, insertions, removals, and updates.
-///
+/// [`new`]: #method.new
+/// [`with_capacity`]: #method.with_capacity
+/// [`with_stripes`]: #method.with_stripes
+/// [`with_stripes_and_capacity`]: #method.with_stripes_and_capacity
+/// [`with_stripes_and_hasher`]: #method.with_stripes_and_hasher
+/// [`with_stripes_capacity_and_hasher`]: #method.with_stripes_capacity_and_hasher
 /// [aHash]: https://docs.rs/ahash
 /// [AES-NI]: https://en.wikipedia.org/wiki/AES_instruction_set
 /// [`RandomState`]: https://doc.rust-lang.org/std/collections/hash_map/struct.RandomState.html
@@ -80,60 +75,124 @@ pub type DefaultHashBuilder = RandomState;
 /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
 /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
 /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
-/// [Junction]: https://github.com/preshing/junction
-/// [this blog post]: https://preshing.com/20160222/a-resizable-concurrent-map/
 #[derive(Default)]
 pub struct HashMap<K, V, S = DefaultHashBuilder> {
-    bucket_array: Atomic<bucket::BucketArray<K, V>>,
+    stripes: Box<[(Atomic<BucketArray<K, V>>, AtomicUsize)]>,
     build_hasher: S,
     len: AtomicUsize,
+    stripe_shift: u32,
 }
 
+#[cfg(feature = "num-cpus")]
 impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// Creates an empty `HashMap`.
     ///
     /// The hash map is created with a capacity of 0 and will not allocate any
-    /// space for elements until the first insertion.
-    pub fn new() -> HashMap<K, V, DefaultHashBuilder> {
-        HashMap::with_capacity_and_hasher(0, DefaultHashBuilder::default())
+    /// submaps until the first insertion. It will, however, allocate space for
+    /// submap pointers.
+    ///
+    /// The `HashMap` will be created with at least as many submaps as the
+    /// system has CPUs.
+    pub fn new() -> Self {
+        Self::with_stripes_capacity_and_hasher(
+            Self::default_num_stripes(),
+            0,
+            DefaultHashBuilder::default(),
+        )
     }
 
     /// Creates an empty `HashMap` with space for at least `capacity` elements
     /// without reallocating.
     ///
-    /// If `capacity == 0`, no allocations will occur.
-    pub fn with_capacity(capacity: usize) -> HashMap<K, V, DefaultHashBuilder> {
-        HashMap::with_capacity_and_hasher(capacity, DefaultHashBuilder::default())
+    /// If `capacity == 0`, only space for submap pointers and lengths will be
+    /// allocated.
+    ///
+    /// The `HashMap` will be created with at least as many submaps as the
+    /// system has CPUs.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_stripes_capacity_and_hasher(
+            Self::default_num_stripes(),
+            capacity,
+            DefaultHashBuilder::default(),
+        )
+    }
+
+    fn default_num_stripes() -> usize {
+        num_cpus::get() * 2
+    }
+}
+
+impl<K, V> HashMap<K, V, DefaultHashBuilder> {
+    /// Creates an empty `HashMap` with at least `num_stripes` submaps.
+    ///
+    /// Each submap will have a capacity of 0 and will require a table to be
+    /// allocated upon the first insertion into that submap.
+    pub fn with_stripes(num_stripes: usize) -> Self {
+        Self::with_stripes_capacity_and_hasher(num_stripes, 0, DefaultHashBuilder::default())
+    }
+
+    /// Creates an empty `HashMap` with at least `num_stripes` submaps and
+    /// space for at least `capacity` elements in each submap without
+    /// reallocating.
+    ///
+    /// If `capacity == 0`, no submaps will be allocated, but space to hold
+    /// submap pointers and lengths will be allocated.
+    pub fn with_stripes_and_capacity(num_stripes: usize, capacity: usize) -> Self {
+        Self::with_stripes_capacity_and_hasher(num_stripes, capacity, DefaultHashBuilder::default())
     }
 }
 
 impl<K, V, S> HashMap<K, V, S> {
-    /// Creates an empty `HashMap` that will use `build_hasher` to hash keys.
+    /// Creates an empty `HashMap` that will use `build_hasher` to hash keys
+    /// with at least `num_stripes` submaps.
     ///
-    /// The created map will have a capacity of 0 and as such will not have any
-    /// space for elements allocated until the first insertion.
-    pub fn with_hasher(build_hasher: S) -> HashMap<K, V, S> {
-        HashMap::with_capacity_and_hasher(0, build_hasher)
+    /// Each submap will have a capacity of 0 and will require a table to be
+    /// allocated upon the first insertion into that submap.
+    pub fn with_stripes_and_hasher(num_stripes: usize, build_hasher: S) -> Self {
+        Self::with_stripes_capacity_and_hasher(num_stripes, 0, build_hasher)
     }
 
-    /// Creates an empty `HashMap` that will hold at least `capacity` elements
-    /// without reallocating and that uses `build_hasher` to hash keys.
+    /// Creates an empty `HashMap` that will use `build_hasher` to hash keys,
+    /// hold at least `capacity` elements without reallocating, and have at
+    /// least `num_stripes` submaps.
     ///
-    /// If `capacity == 0`, no allocations will occur.
-    pub fn with_capacity_and_hasher(capacity: usize, build_hasher: S) -> HashMap<K, V, S> {
-        let bucket_array = if capacity == 0 {
-            Atomic::null()
+    /// If `capacity == 0`, no submaps will be allocated, but space to hold
+    /// submap pointers and lengths will be allocated.
+    pub fn with_stripes_capacity_and_hasher(
+        num_stripes: usize,
+        capacity: usize,
+        build_hasher: S,
+    ) -> Self {
+        assert!(num_stripes > 0);
+
+        let actual_num_stripes = num_stripes.next_power_of_two();
+        let stripe_shift = 64 - actual_num_stripes.trailing_zeros();
+
+        let mut stripes = Vec::with_capacity(actual_num_stripes);
+
+        if capacity == 0 {
+            unsafe {
+                ptr::write_bytes(stripes.as_mut_ptr(), 0, actual_num_stripes);
+                stripes.set_len(actual_num_stripes);
+            }
         } else {
-            Atomic::new(BucketArray::with_length(
-                0,
-                (capacity * 2).next_power_of_two(),
-            ))
-        };
+            let actual_capacity = (capacity * 2).next_power_of_two();
+
+            for _ in 0..actual_num_stripes {
+                stripes.push((
+                    Atomic::new(BucketArray::with_length(0, actual_capacity)),
+                    AtomicUsize::new(0),
+                ));
+            }
+        }
+
+        let stripes = stripes.into_boxed_slice();
 
         Self {
-            bucket_array,
+            stripes,
             build_hasher,
             len: AtomicUsize::new(0),
+            stripe_shift,
         }
     }
 
@@ -157,6 +216,9 @@ impl<K, V, S> HashMap<K, V, S> {
     /// Returns the number of elements this `HashMap` can hold without
     /// reallocating a table.
     ///
+    /// As `HashMap` consists of multiple separately allocated subtables, this
+    /// function returns the minimum of each subtable's capacity.
+    ///
     /// Note that all mutating operations, with the exception of removing
     /// elements, incur at least one allocation for the associated bucket.
     ///
@@ -165,11 +227,43 @@ impl<K, V, S> HashMap<K, V, S> {
     pub fn capacity(&self) -> usize {
         let guard = &crossbeam_epoch::pin();
 
-        let bucket_array_ptr = self.bucket_array.load_consume(guard);
+        self.stripes
+            .iter()
+            .map(|s| s.0.load_consume(guard))
+            .map(|p| unsafe { p.as_ref() })
+            .map(|a| a.map(BucketArray::capacity).unwrap_or(0))
+            .min()
+            .unwrap()
+    }
 
-        unsafe { bucket_array_ptr.as_ref() }
+    /// Returns the number of elements that the `stripe`-th submap of this
+    /// `HashMap` can hold without reallocating a table.
+    ///
+    /// Note that all mutating operations, with the exception of removing
+    /// elements, incur at least one allocation for the associated bucket.
+    ///
+    /// If there are insertion operations in flight, it is possible that a
+    /// new, larger table has already been allocated.
+    pub fn submap_capacity(&self, index: usize) -> usize {
+        assert!(index < self.stripes.len());
+
+        let guard = &crossbeam_epoch::pin();
+
+        unsafe { self.stripes[index].0.load_consume(guard).as_ref() }
             .map(BucketArray::capacity)
             .unwrap_or(0)
+    }
+}
+
+impl<K, V, S: BuildHasher> HashMap<K, V, S> {
+    /// Returns the index of the submap that `key` would be located in.
+    pub fn submap_index<Q: Hash>(&self, key: &Q) -> usize
+    where
+        K: Borrow<Q>,
+    {
+        let hash = bucket::hash(&self.build_hasher, key);
+
+        self.stripe_index_from_hash(hash)
     }
 }
 
@@ -258,7 +352,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref()
+        self.bucket_array_ref(hash)
             .get_key_value_and(key, hash, with_entry)
     }
 
@@ -333,8 +427,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ) -> Option<T> {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref()
-            .insert_entry_and(key, hash, value, with_previous_entry)
+        let result =
+            self.bucket_array_ref(hash)
+                .insert_entry_and(key, hash, value, with_previous_entry);
+
+        if result.is_none() {
+            self.len.fetch_add(1, Ordering::Relaxed);
+        }
+
+        result
     }
 
     /// If there is a value associated with `key`, remove and return a copy of
@@ -526,8 +627,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref()
-            .remove_entry_if_and(key, hash, condition, with_previous_entry)
+        self.bucket_array_ref(hash)
+            .remove_entry_if_and(key, hash, condition, move |k, v| {
+                self.len.fetch_sub(1, Ordering::Relaxed);
+
+                with_previous_entry(k, v)
+            })
     }
 
     /// Insert a value if none is associated with `key`. Otherwise, replace the
@@ -751,13 +856,19 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ) -> Option<T> {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref().insert_with_or_modify_entry_and(
+        let result = self.bucket_array_ref(hash).insert_with_or_modify_entry_and(
             key,
             hash,
             on_insert,
             on_modify,
             with_old_entry,
-        )
+        );
+
+        if result.is_none() {
+            self.len.fetch_add(1, Ordering::Relaxed);
+        }
+
+        result
     }
 
     /// If there is a value associated with `key`, replace it with the result of
@@ -855,19 +966,8 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ) -> Option<T> {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref()
+        self.bucket_array_ref(hash)
             .modify_entry_and(key, hash, on_modify, with_old_entry)
-    }
-}
-
-impl<K, V, S> HashMap<K, V, S> {
-    #[inline]
-    fn bucket_array_ref(&'_ self) -> BucketArrayRef<'_, K, V, S> {
-        BucketArrayRef {
-            bucket_array: &self.bucket_array,
-            build_hasher: &self.build_hasher,
-            len: &self.len,
-        }
     }
 }
 
@@ -876,29 +976,51 @@ impl<K, V, S> Drop for HashMap<K, V, S> {
         let guard = unsafe { &crossbeam_epoch::unprotected() };
         atomic::fence(Ordering::Acquire);
 
-        let mut current_ptr = self.bucket_array.load(Ordering::Relaxed, guard);
+        for (this_bucket_array, _) in self.stripes.iter() {
+            let mut current_ptr = this_bucket_array.load(Ordering::Relaxed, guard);
 
-        while let Some(current_ref) = unsafe { current_ptr.as_ref() } {
-            let next_ptr = current_ref.next.load(Ordering::Relaxed, guard);
+            while let Some(current_ref) = unsafe { current_ptr.as_ref() } {
+                let next_ptr = current_ref.next.load(Ordering::Relaxed, guard);
 
-            for this_bucket_ptr in current_ref
-                .buckets
-                .iter()
-                .map(|b| b.load(Ordering::Relaxed, guard))
-                .filter(|p| !p.is_null())
-                .filter(|p| next_ptr.is_null() || p.tag() & bucket::TOMBSTONE_TAG == 0)
-            {
-                // only delete tombstones from the newest bucket array
-                // the only way this becomes a memory leak is if there was a panic during a rehash,
-                // in which case i'm going to say that running destructors and freeing memory is
-                // best-effort, and my best effort is to not do it
-                unsafe { bucket::defer_acquire_destroy(guard, this_bucket_ptr) };
+                for this_bucket_ptr in current_ref
+                    .buckets
+                    .iter()
+                    .map(|b| b.load(Ordering::Relaxed, guard))
+                    .filter(|p| !p.is_null())
+                    .filter(|p| next_ptr.is_null() || p.tag() & bucket::TOMBSTONE_TAG == 0)
+                {
+                    // only delete tombstones from the newest bucket array
+                    // the only way this becomes a memory leak is if there was a panic during a rehash,
+                    // in which case i'm going to say that running destructors and freeing memory is
+                    // best-effort, and my best effort is to not do it
+                    unsafe { bucket::defer_acquire_destroy(guard, this_bucket_ptr) };
+                }
+
+                unsafe { bucket::defer_acquire_destroy(guard, current_ptr) };
+
+                current_ptr = next_ptr;
             }
-
-            unsafe { bucket::defer_acquire_destroy(guard, current_ptr) };
-
-            current_ptr = next_ptr;
         }
+    }
+}
+
+impl<K, V, S> HashMap<K, V, S> {
+    #[inline]
+    fn bucket_array_ref(&'_ self, hash: u64) -> BucketArrayRef<'_, K, V, S> {
+        let index = self.stripe_index_from_hash(hash);
+
+        let (ref bucket_array, ref len) = self.stripes[index];
+
+        BucketArrayRef {
+            bucket_array,
+            build_hasher: &self.build_hasher,
+            len,
+        }
+    }
+
+    #[inline]
+    fn stripe_index_from_hash(&'_ self, hash: u64) -> usize {
+        (hash >> self.stripe_shift) as usize
     }
 }
 

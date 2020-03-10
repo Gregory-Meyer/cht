@@ -39,12 +39,13 @@ pub(crate) struct BucketArray<K, V> {
 }
 
 impl<K, V> BucketArray<K, V> {
-    pub(crate) fn with_capacity(epoch: usize, capacity: usize) -> Self {
-        let real_capacity = (capacity * 2).next_power_of_two();
-        let mut buckets = Vec::with_capacity(real_capacity);
+    pub(crate) fn with_length(epoch: usize, length: usize) -> Self {
+        assert!(length.is_power_of_two());
+        let mut buckets = Vec::with_capacity(length);
 
-        for _ in 0..real_capacity {
-            buckets.push(Atomic::null());
+        unsafe {
+            ptr::write_bytes(buckets.as_mut_ptr(), 0, length);
+            buckets.set_len(length);
         }
 
         let buckets = buckets.into_boxed_slice();
@@ -473,9 +474,9 @@ impl<'g, K: 'g, V: 'g> BucketArray<K, V> {
             }
 
             let new_next = maybe_new_next.unwrap_or_else(|| {
-                Owned::new(BucketArray::with_capacity(
+                Owned::new(BucketArray::with_length(
                     self.epoch + 1,
-                    self.buckets.len(),
+                    self.buckets.len() * 2,
                 ))
             });
 
@@ -709,7 +710,7 @@ mod tests {
     #[test]
     fn get_insert_remove() {
         let build_hasher = RandomState::new();
-        let buckets = BucketArray::with_capacity(0, 8);
+        let buckets = BucketArray::with_length(0, 16);
         let guard = unsafe { &crossbeam_epoch::unprotected() };
 
         let k1 = "foo";
