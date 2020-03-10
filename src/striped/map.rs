@@ -118,7 +118,7 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     }
 
     fn default_num_stripes() -> usize {
-        num_cpus::get()
+        num_cpus::get() * 2
     }
 }
 
