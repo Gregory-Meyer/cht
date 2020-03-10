@@ -188,6 +188,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     /// [`get_and`]: #method.get_and
+    #[inline]
     pub fn get<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -207,6 +208,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     /// [`get_key_value_and`]: #method.get_key_value_and
+    #[inline]
     pub fn get_key_value<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q> + Clone,
@@ -225,6 +227,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    #[inline]
     pub fn get_and<Q: Hash + Eq + ?Sized, F: FnOnce(&V) -> T, T>(
         &self,
         key: &Q,
@@ -247,6 +250,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    #[inline]
     pub fn get_key_value_and<Q: Hash + Eq + ?Sized, F: FnOnce(&K, &V) -> T, T>(
         &self,
         key: &Q,
@@ -272,6 +276,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn insert(&self, key: K, value: V) -> Option<V>
     where
         V: Clone,
@@ -289,6 +294,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn insert_entry(&self, key: K, value: V) -> Option<(K, V)>
     where
         K: Clone,
@@ -304,6 +310,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// returned and `with_previous_value` is not invoked.
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    #[inline]
     pub fn insert_and<F: FnOnce(&V) -> T, T>(
         &self,
         key: K,
@@ -320,6 +327,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// returned and `with_previous_entry` is not invoked.
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    #[inline]
     pub fn insert_entry_and<F: FnOnce(&K, &V) -> T, T>(
         &self,
         key: K,
@@ -342,6 +350,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn remove<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -360,6 +369,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn remove_entry<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q> + Clone,
@@ -376,6 +386,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    #[inline]
     pub fn remove_and<Q: Hash + Eq + ?Sized, F: FnOnce(&V) -> T, T>(
         &self,
         key: &Q,
@@ -395,6 +406,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    #[inline]
     pub fn remove_entry_and<Q: Hash + Eq + ?Sized, F: FnOnce(&K, &V) -> T, T>(
         &self,
         key: &Q,
@@ -420,6 +432,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn remove_if<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool>(
         &self,
         key: &Q,
@@ -445,6 +458,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn remove_entry_if<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool>(
         &self,
         key: &Q,
@@ -471,6 +485,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    #[inline]
     pub fn remove_if_and<Q: Hash + Eq + ?Sized, F: FnMut(&K, &V) -> bool, G: FnOnce(&V) -> T, T>(
         &self,
         key: &Q,
@@ -497,6 +512,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    #[inline]
     pub fn remove_entry_if_and<
         Q: Hash + Eq + ?Sized,
         F: FnMut(&K, &V) -> bool,
@@ -529,6 +545,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn insert_or_modify<F: FnMut(&K, &V) -> V>(
         &self,
         key: K,
@@ -553,6 +570,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn insert_or_modify_entry<F: FnMut(&K, &V) -> V>(
         &self,
         key: K,
@@ -587,6 +605,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn insert_with_or_modify<F: FnOnce() -> V, G: FnMut(&K, &V) -> V>(
         &self,
         key: K,
@@ -615,6 +634,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn insert_with_or_modify_entry<F: FnOnce() -> V, G: FnMut(&K, &V) -> V>(
         &self,
         key: K,
@@ -640,6 +660,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// multiple times, even if [`None`] is returned.
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    #[inline]
     pub fn insert_or_modify_and<F: FnMut(&K, &V) -> V, G: FnOnce(&V) -> T, T>(
         &self,
         key: K,
@@ -665,6 +686,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// multiple times, even if [`None`] is returned.
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
+    #[inline]
     pub fn insert_or_modify_entry_and<F: FnMut(&K, &V) -> V, G: FnOnce(&K, &V) -> T, T>(
         &self,
         key: K,
@@ -687,6 +709,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
+    #[inline]
     pub fn insert_with_or_modify_and<
         F: FnOnce() -> V,
         G: FnMut(&K, &V) -> V,
@@ -716,6 +739,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ///
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Some`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.Some
+    #[inline]
     pub fn insert_with_or_modify_entry_and<
         F: FnOnce() -> V,
         G: FnMut(&K, &V) -> V,
@@ -754,6 +778,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn modify<F: FnMut(&K, &V) -> V>(&self, key: K, on_modify: F) -> Option<V>
     where
         V: Clone,
@@ -776,6 +801,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
     /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    #[inline]
     pub fn modify_entry<F: FnMut(&K, &V) -> V>(&self, key: K, on_modify: F) -> Option<(K, V)>
     where
         K: Clone,
@@ -799,6 +825,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    #[inline]
     pub fn modify_and<F: FnMut(&K, &V) -> V, G: FnOnce(&V) -> T, T>(
         &self,
         key: K,
@@ -822,6 +849,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    #[inline]
     pub fn modify_entry_and<F: FnMut(&K, &V) -> V, G: FnOnce(&K, &V) -> T, T>(
         &self,
         key: K,
@@ -836,6 +864,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
 }
 
 impl<K, V, S> HashMap<K, V, S> {
+    #[inline]
     fn bucket_array_ref(&'_ self) -> BucketArrayRef<'_, K, V, S> {
         BucketArrayRef {
             bucket_array: &self.bucket_array,
