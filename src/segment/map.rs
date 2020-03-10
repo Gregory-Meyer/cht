@@ -500,16 +500,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         result
     }
 
-    /// If there is a value associated with `key`, remove and return a copy of
-    /// it.
+    /// Removes a key from the map, returning a clone of the value previously
+    /// corresponding to the key.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`. `V` must implement [`Clone`], as other
-    /// threads may hold references to the associated value.
+    /// The key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for
+    /// the key type.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     #[inline]
     pub fn remove<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<V>
     where
@@ -519,16 +518,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, |_, _| true, |_, v| v.clone())
     }
 
-    /// If there is a value associated with `key`, remove it and return a copy
-    /// of the previous entity.
+    /// Removes a key from the map, returning a clone of the key-value pair
+    /// previously corresponding to the key.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`. `K` and `V` must implement [`Clone`], as other
-    /// threads may hold references to the entry.
+    /// The key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for
+    /// the key type.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
     #[inline]
     pub fn remove_entry<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<(K, V)>
     where
@@ -538,11 +536,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, |_, _| true, |k, v| (k.clone(), v.clone()))
     }
 
-    /// If there is a value associated with `key`, remove it and return the
-    /// result of invoking `with_previous_value` with that value.
+    /// Remove a key from the map, returning the result of invoking a function
+    /// with a reference to the value previously corresponding to the key.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`.
+    /// The key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for
+    /// the key type.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
@@ -558,11 +557,13 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.remove_entry_if_and(key, |_, _| true, move |_, v| with_previous_value(v))
     }
 
-    /// If there is a value associated with `key`, remove it and return the
-    /// result of invoking `with_previous_entry` with that entry.
+    /// Removes a key from the map, returning the result of invoking a function
+    /// with a reference to the key-value pair previously corresponding to the
+    /// key.
     ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`.
+    /// The key may be any borrowed form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for
+    /// the key type.
     ///
     /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
     /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
