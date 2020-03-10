@@ -921,21 +921,8 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         result
     }
 
-    /// If there is a value associated with `key`, replace it with the result of
-    /// invoking `on_modify` using the current key and value, then return a copy
-    /// of the previously associated value.
-    ///
-    /// If there is no value associated with `key`, [`None`] will be returned.
-    /// `on_modify` may be invoked multiple times, even if [`None`] is returned.
-    ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`. `V` must implement [`Clone`], as other
-    /// threads may hold references to the associated value.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
-    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    /// Modifies the value corresponding to a key, returning a clone of the
+    /// value previously corresponding to that key.
     #[inline]
     pub fn modify<F: FnMut(&K, &V) -> V>(&self, key: K, on_modify: F) -> Option<V>
     where
@@ -944,21 +931,8 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.modify_entry_and(key, on_modify, |_, v| v.clone())
     }
 
-    /// If there is a value associated with `key`, replace it with the result of
-    /// invoking `on_modify` using the current key and value, then return a copy
-    /// of the previously entry.
-    ///
-    /// If there is no value associated with `key`, [`None`] will be returned.
-    /// `on_modify` may be invoked multiple times, even if [`None`] is returned.
-    ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`. `K` and `V` must implement [`Clone`], as other
-    /// threads may hold references to the entry.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
-    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
-    /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+    /// Modifies the value corresponding to a key, returning a clone of the
+    /// key-value pair previously corresponding to that key.
     #[inline]
     pub fn modify_entry<F: FnMut(&K, &V) -> V>(&self, key: K, on_modify: F) -> Option<(K, V)>
     where
@@ -968,21 +942,9 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.modify_entry_and(key, on_modify, |k, v| (k.clone(), v.clone()))
     }
 
-    /// If there is a value associated with `key`, replace it with the result of
-    /// invoking `on_modify` using the current key and value, then return the
-    /// result of invoking `with_old_value` with the previously associated
-    /// value.
-    ///
-    /// If there is no value associated with `key`, `with_old_value` will not be
-    /// invoked and [`None`] will be returned. `on_modify` may be invoked
-    /// multiple times, even if [`None`] is returned.
-    ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
-    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// Modifies the value corresponding to a key, returning the result of
+    /// invoking a function with a reference to the value previously
+    /// corresponding to the key.
     #[inline]
     pub fn modify_and<F: FnMut(&K, &V) -> V, G: FnOnce(&V) -> T, T>(
         &self,
@@ -993,20 +955,9 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         self.modify_entry_and(key, on_modify, move |_, v| with_old_value(v))
     }
 
-    /// If there is a value associated with `key`, replace it with the result of
-    /// invoking `on_modify` using the current key and value, then return the
-    /// result of invoking `with_old_value` with the previous entry.
-    ///
-    /// If there is no value associated with `key`, `with_old_value` will not be
-    /// invoked and [`None`] will be returned. `on_modify` may be invoked
-    /// multiple times, even if [`None`] is returned.
-    ///
-    /// `Q` can be any borrowed form of `K`, but [`Hash`] and [`Eq`] on `Q`
-    /// *must* match that of `K`.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/std/option/enum.Option.html#variant.None
-    /// [`Hash`]: https://doc.rust-lang.org/std/hash/trait.Hash.html
-    /// [`Eq`]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
+    /// Modifies the value corresponding to a key, returning the result of
+    /// invoking a function with a reference to the key-value pair previously
+    /// corresponding to the supplied key.
     #[inline]
     pub fn modify_entry_and<F: FnMut(&K, &V) -> V, G: FnOnce(&K, &V) -> T, T>(
         &self,
