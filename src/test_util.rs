@@ -22,6 +22,9 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#[macro_use]
+pub(crate) mod tests;
+
 use std::{
     borrow::{Borrow, BorrowMut},
     hash::{Hash, Hasher},
