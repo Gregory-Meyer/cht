@@ -32,11 +32,11 @@
 //! [Junction]: https://github.com/preshing/junction
 
 pub mod map;
-pub mod striped;
+pub mod segment;
 
 #[cfg(test)]
 #[macro_use]
 pub(crate) mod test_util;
 
 pub use map::HashMap;
-pub use striped::HashMap as StripedHashMap;
+pub use segment::HashMap as SegmentedHashMap;
