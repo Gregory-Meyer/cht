@@ -31,6 +31,7 @@ use crate::map::{
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash},
+    ptr,
     sync::atomic::{self, AtomicUsize, Ordering},
 };
 
@@ -170,8 +171,9 @@ impl<K, V, S> HashMap<K, V, S> {
         let mut stripes = Vec::with_capacity(actual_num_stripes);
 
         if capacity == 0 {
-            for _ in 0..actual_num_stripes {
-                stripes.push((Atomic::null(), AtomicUsize::new(0)));
+            unsafe {
+                ptr::write_bytes(stripes.as_mut_ptr(), 0, actual_num_stripes);
+                stripes.set_len(actual_num_stripes);
             }
         } else {
             let actual_capacity = (capacity * 2).next_power_of_two();

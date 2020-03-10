@@ -43,8 +43,9 @@ impl<K, V> BucketArray<K, V> {
         assert!(length.is_power_of_two());
         let mut buckets = Vec::with_capacity(length);
 
-        for _ in 0..length {
-            buckets.push(Atomic::null());
+        unsafe {
+            ptr::write_bytes(buckets.as_mut_ptr(), 0, length);
+            buckets.set_len(length);
         }
 
         let buckets = buckets.into_boxed_slice();
