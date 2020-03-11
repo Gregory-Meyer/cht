@@ -953,5 +953,39 @@ macro_rules! write_test_cases_for_me {
 
             $crate::test_util::run_deferred();
         }
+
+        #[test]
+        fn default() {
+            let map = $m::<_, _, $crate::map::DefaultHashBuilder>::default();
+
+            assert!(map.is_empty());
+            assert_eq!(map.len(), 0);
+
+            assert_eq!(map.insert("foo", 5), None);
+            assert_eq!(map.insert("bar", 10), None);
+            assert_eq!(map.insert("baz", 15), None);
+            assert_eq!(map.insert("qux", 20), None);
+
+            assert!(!map.is_empty());
+            assert_eq!(map.len(), 4);
+
+            assert_eq!(map.insert("foo", 5), Some(5));
+            assert_eq!(map.insert("bar", 10), Some(10));
+            assert_eq!(map.insert("baz", 15), Some(15));
+            assert_eq!(map.insert("qux", 20), Some(20));
+
+            assert!(!map.is_empty());
+            assert_eq!(map.len(), 4);
+
+            assert_eq!(map.remove("foo"), Some(5));
+            assert_eq!(map.remove("bar"), Some(10));
+            assert_eq!(map.remove("baz"), Some(15));
+            assert_eq!(map.remove("qux"), Some(20));
+
+            assert!(map.is_empty());
+            assert_eq!(map.len(), 0);
+
+            $crate::test_util::run_deferred();
+        }
     };
 }
