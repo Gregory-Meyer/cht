@@ -23,14 +23,21 @@
 // SOFTWARE.
 
 #[cfg(all(
-    target_feature = "sse2",
+    target_feature = "avx2",
     any(target_arch = "x86", target_arch = "x86_64")
 ))]
-#[path = "bucket/arch/x86.rs"]
+#[path = "bucket/arch/avx2.rs"]
+mod arch;
+
+#[cfg(all(
+    all(target_feature = "sse2", not(target_feature = "avx2")),
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+#[path = "bucket/arch/sse2.rs"]
 mod arch;
 
 #[cfg(not(all(
-    target_feature = "sse2",
+    any(target_feature = "sse2", target_feature = "avx2"),
     any(target_arch = "x86", target_arch = "x86_64")
 )))]
 #[path = "bucket/arch/generic.rs"]
@@ -40,10 +47,11 @@ use arch::{ControlBytes, Searcher};
 
 use std::{
     borrow::Borrow,
+    env,
     hash::{BuildHasher, Hash, Hasher},
     mem::{self, MaybeUninit},
     ptr,
-    sync::atomic::{self, Ordering},
+    sync::atomic::{self, AtomicU64, Ordering},
     u64, u8,
 };
 
@@ -72,7 +80,7 @@ pub(crate) struct BucketPointerArray<K, V> {
 
 impl<K, V> BucketPointerArray<K, V> {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
-        let num_buckets = capacity * 2;
+        let num_buckets = (capacity as f64 / max_load_factor()).ceil() as usize;
 
         let length = if num_buckets % arch::BUCKETS_PER_GROUP != 0 {
             num_buckets / arch::BUCKETS_PER_GROUP + 1
@@ -105,8 +113,30 @@ impl<K, V> BucketPointerArray<K, V> {
         assert_eq!(self.groups.len(), self.control_bytes.len());
         assert!(self.groups.len().is_power_of_two());
 
-        self.groups.len() * arch::BUCKETS_PER_GROUP / 2
+        ((self.groups.len() * arch::BUCKETS_PER_GROUP) as f64 * max_load_factor()) as usize
     }
+}
+
+fn max_load_factor() -> f64 {
+    const DEFAULT_MAX_LOAD_FACTOR: f64 = 0.9375;
+    static STORAGE: AtomicU64 = AtomicU64::new(u64::MAX);
+
+    let mut storage = STORAGE.load(Ordering::Relaxed);
+
+    if storage == u64::MAX {
+        storage = env::var("MAX_LOAD_FACTOR")
+            .ok()
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_LOAD_FACTOR)
+            .to_bits();
+
+        STORAGE
+            .compare_exchange_weak(u64::MAX, storage, Ordering::Relaxed, Ordering::Relaxed)
+            .ok();
+    }
+
+    f64::from_bits(storage)
 }
 
 unsafe fn boxed_zeroed_slice<T>(length: usize) -> Box<[T]> {
