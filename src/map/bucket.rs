@@ -287,7 +287,97 @@ impl<'g, K: 'g + Eq, V: 'g> BucketPointerArray<K, V> {
     where
         K: Borrow<Q>,
     {
-        unimplemented!()
+        let (control, index) = split_hash(hash);
+        let offset = index & self.modulo_mask;
+
+        let searcher = Searcher::new(control);
+
+        for i in (0..self.control_bytes.len()).map(|i| i.wrapping_add(offset) & self.modulo_mask) {
+            let this_group = &self.groups[i];
+            let these_control_bytes = self.control_bytes[i].load();
+
+            let (mut zero_move_mask, mut query_move_mask) =
+                if let Some((z, q)) = searcher.search(these_control_bytes) {
+                    (z, q)
+                } else {
+                    return Err(condition);
+                };
+
+            match (zero_move_mask, query_move_mask) {
+                (0, 0) => continue,                  // no zeros and no matches; keep probing
+                (_, 0) => return Ok(Shared::null()), // zeros, but no matches; key not inserted
+                _ => {
+                    while query_move_mask != 0 {
+                        let query_tz = query_move_mask.trailing_zeros();
+                        let zeros_tz = zero_move_mask.trailing_zeros();
+
+                        assert_ne!(zeros_tz, query_tz);
+
+                        let j = if zeros_tz < query_tz {
+                            zero_move_mask &= !(1 << zeros_tz);
+
+                            zeros_tz as usize
+                        } else {
+                            query_move_mask &= !(1 << query_tz);
+
+                            query_tz as usize
+                        };
+
+                        loop {
+                            let this_bucket_ptr = this_group.buckets[j].load_consume(guard);
+
+                            if this_bucket_ptr.tag() & SENTINEL_TAG != 0 {
+                                assert!(this_bucket_ptr.is_null());
+
+                                return Err(condition);
+                            }
+
+                            assert!(!this_bucket_ptr.is_null());
+                            let this_bucket_ref = unsafe { this_bucket_ptr.deref() };
+
+                            if this_bucket_ref.key.borrow() != key {
+                                break;
+                            }
+
+                            if this_bucket_ptr.tag() & TOMBSTONE_TAG != 0 {
+                                return Ok(Shared::null());
+                            }
+
+                            let value = unsafe { &*this_bucket_ref.maybe_value.as_ptr() };
+
+                            if !condition(&this_bucket_ref.key, value) {
+                                return Ok(Shared::null());
+                            }
+
+                            if this_group.buckets[j]
+                                .compare_and_set_weak(
+                                    this_bucket_ptr,
+                                    this_bucket_ptr.with_tag(TOMBSTONE_TAG),
+                                    (Ordering::Release, Ordering::Relaxed),
+                                    guard,
+                                )
+                                .is_ok()
+                            {
+                                unsafe {
+                                    defer_destroy_tombstone(
+                                        guard,
+                                        this_bucket_ptr.with_tag(TOMBSTONE_TAG),
+                                    )
+                                };
+
+                                return Ok(this_bucket_ptr.with_tag(TOMBSTONE_TAG));
+                            }
+                        }
+                    }
+
+                    if zero_move_mask != 0 {
+                        return Ok(Shared::null());
+                    }
+                }
+            }
+        }
+
+        Ok(Shared::null())
     }
 
     pub(crate) fn modify<F: FnMut(&K, &V) -> V>(

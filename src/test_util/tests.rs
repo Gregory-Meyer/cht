@@ -929,7 +929,7 @@ macro_rules! write_test_cases_for_me {
 
             let is_even = |_: &i32, v: &i32| *v % 2 == 0;
 
-            let map = $m::new();
+            let map = $m::with_capacity(NUM_VALUES as usize);
 
             for i in 0..NUM_VALUES {
                 assert_eq!(map.insert(i, i), None);
