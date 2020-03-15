@@ -26,10 +26,10 @@
 //! and linear probing.
 
 pub(crate) mod bucket;
-pub(crate) mod bucket_array_ref;
+pub(crate) mod bucket_pointer_array_ref;
 
-use bucket::BucketArray;
-use bucket_array_ref::BucketArrayRef;
+use bucket::BucketPointerArray;
+use bucket_pointer_array_ref::BucketPointerArrayRef;
 
 use std::{
     borrow::Borrow,
@@ -82,7 +82,7 @@ pub type DefaultHashBuilder = RandomState;
 /// [`RefCell`]: https://doc.rust-lang.org/std/cell/struct.RefCell.html
 #[derive(Default)]
 pub struct HashMap<K, V, S = DefaultHashBuilder> {
-    bucket_array: Atomic<bucket::BucketArray<K, V>>,
+    bucket_pointer_array: Atomic<bucket::BucketPointerArray<K, V>>,
     build_hasher: S,
     len: AtomicUsize,
 }
@@ -123,17 +123,14 @@ impl<K, V, S> HashMap<K, V, S> {
     /// reallocating its bucket pointer array. If `capacity` is 0, the hash map
     /// will not allocate.
     pub fn with_capacity_and_hasher(capacity: usize, build_hasher: S) -> HashMap<K, V, S> {
-        let bucket_array = if capacity == 0 {
+        let bucket_pointer_array = if capacity == 0 {
             Atomic::null()
         } else {
-            Atomic::new(BucketArray::with_length(
-                0,
-                (capacity * 2).next_power_of_two(),
-            ))
+            Atomic::new(BucketPointerArray::with_capacity(capacity))
         };
 
         Self {
-            bucket_array,
+            bucket_pointer_array,
             build_hasher,
             len: AtomicUsize::new(0),
         }
@@ -172,11 +169,18 @@ impl<K, V, S> HashMap<K, V, S> {
     pub fn capacity(&self) -> usize {
         let guard = &crossbeam_epoch::pin();
 
-        let bucket_array_ptr = self.bucket_array.load_consume(guard);
+        let bucket_pointer_array_ptr = self.bucket_pointer_array.load_consume(guard);
 
-        unsafe { bucket_array_ptr.as_ref() }
-            .map(BucketArray::capacity)
+        unsafe { bucket_pointer_array_ptr.as_ref() }
+            .map(BucketPointerArray::capacity)
             .unwrap_or(0)
+    }
+
+    /// Returns a reference to the map's [`BuildHasher`].
+    ///
+    /// [`BuildHasher`]: https://doc.rust-lang.org/std/hash/trait.BuildHasher.html
+    pub fn hasher(&self) -> &S {
+        &self.build_hasher
     }
 }
 
@@ -257,7 +261,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref()
+        self.bucket_pointer_array_ref()
             .get_key_value_and(key, hash, with_entry)
     }
 
@@ -319,7 +323,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ) -> Option<T> {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref()
+        self.bucket_pointer_array_ref()
             .insert_entry_and(key, hash, value, with_previous_entry)
     }
 
@@ -515,8 +519,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref()
-            .remove_entry_if_and(key, hash, condition, with_previous_entry)
+        self.bucket_pointer_array_ref().remove_entry_if_and(
+            key,
+            hash,
+            condition,
+            with_previous_entry,
+        )
     }
 
     /// If no value corresponds to the key, insert a new key-value pair into
@@ -725,13 +733,8 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ) -> Option<T> {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref().insert_with_or_modify_entry_and(
-            key,
-            hash,
-            on_insert,
-            on_modify,
-            with_old_entry,
-        )
+        self.bucket_pointer_array_ref()
+            .insert_with_or_modify_entry_and(key, hash, on_insert, on_modify, with_old_entry)
     }
 
     /// Modifies the value corresponding to a key, returning a clone of the
@@ -780,16 +783,16 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     ) -> Option<T> {
         let hash = bucket::hash(&self.build_hasher, &key);
 
-        self.bucket_array_ref()
+        self.bucket_pointer_array_ref()
             .modify_entry_and(key, hash, on_modify, with_old_entry)
     }
 }
 
 impl<K, V, S> HashMap<K, V, S> {
     #[inline]
-    fn bucket_array_ref(&'_ self) -> BucketArrayRef<'_, K, V, S> {
-        BucketArrayRef {
-            bucket_array: &self.bucket_array,
+    fn bucket_pointer_array_ref(&'_ self) -> BucketPointerArrayRef<'_, K, V, S> {
+        BucketPointerArrayRef {
+            bucket_pointer_array: &self.bucket_pointer_array,
             build_hasher: &self.build_hasher,
             len: &self.len,
         }
@@ -801,14 +804,16 @@ impl<K, V, S> Drop for HashMap<K, V, S> {
         let guard = unsafe { &crossbeam_epoch::unprotected() };
         atomic::fence(Ordering::Acquire);
 
-        let mut current_ptr = self.bucket_array.load(Ordering::Relaxed, guard);
+        let mut current_ptr = self.bucket_pointer_array.load(Ordering::Relaxed, guard);
 
         while let Some(current_ref) = unsafe { current_ptr.as_ref() } {
             let next_ptr = current_ref.next.load(Ordering::Relaxed, guard);
 
             for this_bucket_ptr in current_ref
-                .buckets
+                .groups
                 .iter()
+                .map(|g| g.buckets.iter())
+                .flatten()
                 .map(|b| b.load(Ordering::Relaxed, guard))
                 .filter(|p| !p.is_null())
                 .filter(|p| next_ptr.is_null() || p.tag() & bucket::TOMBSTONE_TAG == 0)

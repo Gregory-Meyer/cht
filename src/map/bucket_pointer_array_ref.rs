@@ -22,7 +22,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use super::bucket::{self, Bucket, BucketArray, InsertOrModifyState, KeyOrOwnedBucket};
+use super::bucket::{self, Bucket, BucketPointerArray, InsertOrModifyState, KeyOrOwnedBucket};
 
 use std::{
     borrow::Borrow,
@@ -32,13 +32,13 @@ use std::{
 
 use crossbeam_epoch::{Atomic, CompareAndSetError, Guard, Owned, Shared};
 
-pub(crate) struct BucketArrayRef<'a, K, V, S> {
-    pub(crate) bucket_array: &'a Atomic<BucketArray<K, V>>,
+pub(crate) struct BucketPointerArrayRef<'a, K, V, S> {
+    pub(crate) bucket_pointer_array: &'a Atomic<BucketPointerArray<K, V>>,
     pub(crate) build_hasher: &'a S,
     pub(crate) len: &'a AtomicUsize,
 }
 
-impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
+impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketPointerArrayRef<'a, K, V, S> {
     pub(crate) fn get_key_value_and<Q: Hash + Eq + ?Sized, F: FnOnce(&K, &V) -> T, T>(
         &self,
         key: &Q,
@@ -50,12 +50,12 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
     {
         let guard = &crossbeam_epoch::pin();
         let current_ref = self.get(guard);
-        let mut bucket_array_ref = current_ref;
+        let mut bucket_pointer_array_ref = current_ref;
 
         let result;
 
         loop {
-            match bucket_array_ref
+            match bucket_pointer_array_ref
                 .get(guard, hash, key)
                 .map(|p| unsafe { p.as_ref() })
             {
@@ -73,12 +73,13 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
                     break;
                 }
                 Err(_) => {
-                    bucket_array_ref = bucket_array_ref.rehash(guard, self.build_hasher);
+                    bucket_pointer_array_ref =
+                        bucket_pointer_array_ref.rehash(guard, self.build_hasher);
                 }
             }
         }
 
-        self.swing(guard, current_ref, bucket_array_ref);
+        self.swing(guard, current_ref, bucket_pointer_array_ref);
 
         result
     }
@@ -92,17 +93,18 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
     ) -> Option<T> {
         let guard = &crossbeam_epoch::pin();
         let current_ref = self.get(guard);
-        let mut bucket_array_ref = current_ref;
+        let mut bucket_pointer_array_ref = current_ref;
         let mut bucket_ptr = Owned::new(Bucket::new(key, value));
 
         let result;
 
         loop {
-            while self.len.load(Ordering::Relaxed) > bucket_array_ref.capacity() {
-                bucket_array_ref = bucket_array_ref.rehash(guard, self.build_hasher);
+            while self.len.load(Ordering::Relaxed) > bucket_pointer_array_ref.capacity() {
+                bucket_pointer_array_ref =
+                    bucket_pointer_array_ref.rehash(guard, self.build_hasher);
             }
 
-            match bucket_array_ref.insert(guard, hash, bucket_ptr) {
+            match bucket_pointer_array_ref.insert(guard, hash, bucket_ptr) {
                 Ok(previous_bucket_ptr) => {
                     if let Some(previous_bucket_ref) = unsafe { previous_bucket_ptr.as_ref() } {
                         if previous_bucket_ptr.tag() & bucket::TOMBSTONE_TAG != 0 {
@@ -126,12 +128,13 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
                 }
                 Err(p) => {
                     bucket_ptr = p;
-                    bucket_array_ref = bucket_array_ref.rehash(guard, self.build_hasher);
+                    bucket_pointer_array_ref =
+                        bucket_pointer_array_ref.rehash(guard, self.build_hasher);
                 }
             }
         }
 
-        self.swing(guard, current_ref, bucket_array_ref);
+        self.swing(guard, current_ref, bucket_pointer_array_ref);
 
         result
     }
@@ -153,12 +156,12 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
     {
         let guard = &crossbeam_epoch::pin();
         let current_ref = self.get(guard);
-        let mut bucket_array_ref = current_ref;
+        let mut bucket_pointer_array_ref = current_ref;
 
         let result;
 
         loop {
-            match bucket_array_ref.remove_if(guard, hash, key, condition) {
+            match bucket_pointer_array_ref.remove_if(guard, hash, key, condition) {
                 Ok(previous_bucket_ptr) => {
                     if let Some(previous_bucket_ref) = unsafe { previous_bucket_ptr.as_ref() } {
                         let Bucket {
@@ -177,12 +180,13 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
                 }
                 Err(c) => {
                     condition = c;
-                    bucket_array_ref = bucket_array_ref.rehash(guard, self.build_hasher);
+                    bucket_pointer_array_ref =
+                        bucket_pointer_array_ref.rehash(guard, self.build_hasher);
                 }
             }
         }
 
-        self.swing(guard, current_ref, bucket_array_ref);
+        self.swing(guard, current_ref, bucket_pointer_array_ref);
 
         result
     }
@@ -202,17 +206,18 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
     ) -> Option<T> {
         let guard = &crossbeam_epoch::pin();
         let current_ref = self.get(guard);
-        let mut bucket_array_ref = current_ref;
+        let mut bucket_pointer_array_ref = current_ref;
         let mut state = InsertOrModifyState::New(key, on_insert);
 
         let result;
 
         loop {
-            while self.len.load(Ordering::Relaxed) > bucket_array_ref.capacity() {
-                bucket_array_ref = bucket_array_ref.rehash(guard, self.build_hasher);
+            while self.len.load(Ordering::Relaxed) > bucket_pointer_array_ref.capacity() {
+                bucket_pointer_array_ref =
+                    bucket_pointer_array_ref.rehash(guard, self.build_hasher);
             }
 
-            match bucket_array_ref.insert_or_modify(guard, hash, state, on_modify) {
+            match bucket_pointer_array_ref.insert_or_modify(guard, hash, state, on_modify) {
                 Ok(previous_bucket_ptr) => {
                     if let Some(previous_bucket_ref) = unsafe { previous_bucket_ptr.as_ref() } {
                         if previous_bucket_ptr.tag() & bucket::TOMBSTONE_TAG != 0 {
@@ -237,12 +242,13 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
                 Err((s, f)) => {
                     state = s;
                     on_modify = f;
-                    bucket_array_ref = bucket_array_ref.rehash(guard, self.build_hasher);
+                    bucket_pointer_array_ref =
+                        bucket_pointer_array_ref.rehash(guard, self.build_hasher);
                 }
             }
         }
 
-        self.swing(guard, current_ref, bucket_array_ref);
+        self.swing(guard, current_ref, bucket_pointer_array_ref);
 
         result
     }
@@ -256,13 +262,13 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
     ) -> Option<T> {
         let guard = &crossbeam_epoch::pin();
         let current_ref = self.get(guard);
-        let mut bucket_array_ref = current_ref;
+        let mut bucket_pointer_array_ref = current_ref;
         let mut key_or_owned_bucket = KeyOrOwnedBucket::Key(key);
 
         let result;
 
         loop {
-            match bucket_array_ref.modify(guard, hash, key_or_owned_bucket, on_modify) {
+            match bucket_pointer_array_ref.modify(guard, hash, key_or_owned_bucket, on_modify) {
                 Ok(previous_bucket_ptr) => {
                     if let Some(previous_bucket_ref) = unsafe { previous_bucket_ptr.as_ref() } {
                         let Bucket {
@@ -281,41 +287,42 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> BucketArrayRef<'a, K, V, S> {
                 Err((kb, f)) => {
                     key_or_owned_bucket = kb;
                     on_modify = f;
-                    bucket_array_ref = bucket_array_ref.rehash(guard, self.build_hasher);
+                    bucket_pointer_array_ref =
+                        bucket_pointer_array_ref.rehash(guard, self.build_hasher);
                 }
             }
         }
 
-        self.swing(guard, current_ref, bucket_array_ref);
+        self.swing(guard, current_ref, bucket_pointer_array_ref);
 
         result
     }
 }
 
-impl<'a, 'g, K, V, S> BucketArrayRef<'a, K, V, S> {
-    fn get(&self, guard: &'g Guard) -> &'g BucketArray<K, V> {
-        const DEFAULT_LENGTH: usize = 128;
+impl<'a, 'g, K, V, S> BucketPointerArrayRef<'a, K, V, S> {
+    fn get(&self, guard: &'g Guard) -> &'g BucketPointerArray<K, V> {
+        const DEFAULT_CAPACITY: usize = 64;
 
-        let mut maybe_new_bucket_array = None;
+        let mut maybe_new_bucket_pointer_array = None;
 
         loop {
-            let bucket_array_ptr = self.bucket_array.load_consume(guard);
+            let bucket_pointer_array_ptr = self.bucket_pointer_array.load_consume(guard);
 
-            if let Some(bucket_array_ref) = unsafe { bucket_array_ptr.as_ref() } {
-                return bucket_array_ref;
+            if let Some(bucket_pointer_array_ref) = unsafe { bucket_pointer_array_ptr.as_ref() } {
+                return bucket_pointer_array_ref;
             }
 
-            let new_bucket_array = maybe_new_bucket_array
-                .unwrap_or_else(|| Owned::new(BucketArray::with_length(0, DEFAULT_LENGTH)));
+            let new_bucket_pointer_array = maybe_new_bucket_pointer_array
+                .unwrap_or_else(|| Owned::new(BucketPointerArray::with_capacity(DEFAULT_CAPACITY)));
 
-            match self.bucket_array.compare_and_set_weak(
+            match self.bucket_pointer_array.compare_and_set_weak(
                 Shared::null(),
-                new_bucket_array,
+                new_bucket_pointer_array,
                 (Ordering::Release, Ordering::Relaxed),
                 guard,
             ) {
                 Ok(b) => return unsafe { b.as_ref() }.unwrap(),
-                Err(CompareAndSetError { new, .. }) => maybe_new_bucket_array = Some(new),
+                Err(CompareAndSetError { new, .. }) => maybe_new_bucket_pointer_array = Some(new),
             }
         }
     }
@@ -323,20 +330,20 @@ impl<'a, 'g, K, V, S> BucketArrayRef<'a, K, V, S> {
     fn swing(
         &self,
         guard: &'g Guard,
-        mut current_ref: &'g BucketArray<K, V>,
-        min_ref: &'g BucketArray<K, V>,
+        mut current_ref: &'g BucketPointerArray<K, V>,
+        min_ref: &'g BucketPointerArray<K, V>,
     ) {
         let min_epoch = min_ref.epoch;
 
-        let mut current_ptr = (current_ref as *const BucketArray<K, V>).into();
-        let min_ptr: Shared<'g, _> = (min_ref as *const BucketArray<K, V>).into();
+        let mut current_ptr = (current_ref as *const BucketPointerArray<K, V>).into();
+        let min_ptr: Shared<'g, _> = (min_ref as *const BucketPointerArray<K, V>).into();
 
         loop {
             if current_ref.epoch >= min_epoch {
                 return;
             }
 
-            match self.bucket_array.compare_and_set_weak(
+            match self.bucket_pointer_array.compare_and_set_weak(
                 current_ptr,
                 min_ptr,
                 (Ordering::Release, Ordering::Relaxed),
@@ -344,7 +351,7 @@ impl<'a, 'g, K, V, S> BucketArrayRef<'a, K, V, S> {
             ) {
                 Ok(_) => unsafe { bucket::defer_acquire_destroy(guard, current_ptr) },
                 Err(_) => {
-                    let new_ptr = self.bucket_array.load_consume(guard);
+                    let new_ptr = self.bucket_pointer_array.load_consume(guard);
                     assert!(!new_ptr.is_null());
 
                     current_ptr = new_ptr;

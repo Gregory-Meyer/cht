@@ -22,49 +22,102 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#[cfg(all(
+    target_feature = "sse2",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+#[path = "bucket/arch/x86.rs"]
+mod arch;
+
+#[cfg(not(all(
+    target_feature = "sse2",
+    any(target_arch = "x86", target_arch = "x86_64")
+)))]
+#[path = "bucket/arch/generic.rs"]
+mod arch;
+
+use arch::{ControlBytes, Searcher};
+
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash, Hasher},
     mem::{self, MaybeUninit},
     ptr,
     sync::atomic::{self, Ordering},
+    u64, u8,
 };
 
 use crossbeam_epoch::{Atomic, CompareAndSetError, Guard, Owned, Shared};
 
-pub(crate) struct BucketArray<K, V> {
-    pub(crate) buckets: Box<[Atomic<Bucket<K, V>>]>,
-    pub(crate) next: Atomic<BucketArray<K, V>>,
-    pub(crate) epoch: usize,
+pub(crate) struct BucketPointerGroup<K, V> {
+    pub(crate) buckets: [Atomic<Bucket<K, V>>; arch::BUCKETS_PER_GROUP],
 }
 
-impl<K, V> BucketArray<K, V> {
-    pub(crate) fn with_length(epoch: usize, length: usize) -> Self {
-        assert!(length.is_power_of_two());
-        let mut buckets = Vec::with_capacity(length);
+const SENTINEL_CONTROL_BYTE: u8 = 0b0111_1111;
 
-        unsafe {
-            ptr::write_bytes(buckets.as_mut_ptr(), 0, length);
-            buckets.set_len(length);
+fn split_hash(hash: u64) -> (u8, usize) {
+    (
+        (hash & 0b0111_1111) as u8 | 0b1000_0000,
+        (hash >> 7) as usize,
+    )
+}
+
+pub(crate) struct BucketPointerArray<K, V> {
+    pub(crate) groups: Box<[BucketPointerGroup<K, V>]>,
+    control_bytes: Box<[ControlBytes]>,
+    pub(crate) next: Atomic<BucketPointerArray<K, V>>,
+    pub(crate) epoch: usize,
+    pub(crate) modulo_mask: usize,
+}
+
+impl<K, V> BucketPointerArray<K, V> {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        let num_buckets = capacity * 2;
+
+        let length = if num_buckets % arch::BUCKETS_PER_GROUP != 0 {
+            num_buckets / arch::BUCKETS_PER_GROUP + 1
+        } else {
+            num_buckets / arch::BUCKETS_PER_GROUP
         }
+        .next_power_of_two();
 
-        let buckets = buckets.into_boxed_slice();
+        Self::with_length(0, length)
+    }
+
+    fn with_length(epoch: usize, length: usize) -> Self {
+        assert!(length.is_power_of_two());
+
+        let groups = unsafe { boxed_zeroed_slice(length) };
+        let control_bytes = unsafe { boxed_zeroed_slice(length) };
+        let next = Atomic::null();
+        let modulo_mask = length - 1;
 
         Self {
-            buckets,
-            next: Atomic::null(),
+            groups,
+            control_bytes,
+            next,
             epoch,
+            modulo_mask,
         }
     }
 
     pub(crate) fn capacity(&self) -> usize {
-        assert!(self.buckets.len().is_power_of_two());
+        assert_eq!(self.groups.len(), self.control_bytes.len());
+        assert!(self.groups.len().is_power_of_two());
 
-        self.buckets.len() / 2
+        self.groups.len() * arch::BUCKETS_PER_GROUP / 2
     }
 }
 
-impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
+unsafe fn boxed_zeroed_slice<T>(length: usize) -> Box<[T]> {
+    let mut vec = Vec::with_capacity(length);
+    ptr::write_bytes(vec.as_mut_ptr(), 0, length);
+    vec.set_len(length);
+
+    vec.into_boxed_slice()
+}
+
+impl<'g, K: 'g + Eq, V: 'g> BucketPointerArray<K, V> {
     pub(crate) fn get<Q: ?Sized + Eq>(
         &self,
         guard: &'g Guard,
@@ -74,74 +127,154 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
     where
         K: Borrow<Q>,
     {
-        let loop_result = self.probe_loop(guard, hash, |_, _, this_bucket_ptr| {
-            let this_bucket_ref = if let Some(this_bucket_ref) = unsafe { this_bucket_ptr.as_ref() }
-            {
-                this_bucket_ref
-            } else {
-                return ProbeLoopAction::Return(Shared::null());
-            };
+        let (control, index) = split_hash(hash);
+        let offset = index & self.modulo_mask;
 
-            let this_key = &this_bucket_ref.key;
+        let searcher = Searcher::new(control);
 
-            if this_key.borrow() != key {
-                return ProbeLoopAction::Continue;
+        for i in (0..self.control_bytes.len()).map(|i| i.wrapping_add(offset) & self.modulo_mask) {
+            let this_group = &self.groups[i];
+            let these_control_bytes = self.control_bytes[i].load();
+
+            let (mut zero_move_mask, mut query_move_mask) =
+                if let Some((z, q)) = searcher.search(these_control_bytes) {
+                    (z, q)
+                } else {
+                    return Err(RelocatedError);
+                };
+
+            match (zero_move_mask, query_move_mask) {
+                (0, 0) => continue,                  // no zeros and no matches; keep probing
+                (_, 0) => return Ok(Shared::null()), // zeros, but no matches; key not inserted
+                _ => {
+                    while query_move_mask != 0 {
+                        let query_tz = query_move_mask.trailing_zeros();
+                        let zeros_tz = zero_move_mask.trailing_zeros();
+
+                        assert_ne!(zeros_tz, query_tz);
+
+                        let j = if zeros_tz < query_tz {
+                            zero_move_mask &= !(1 << zeros_tz);
+
+                            zeros_tz as usize
+                        } else {
+                            query_move_mask &= !(1 << query_tz);
+
+                            query_tz as usize
+                        };
+
+                        let this_bucket_ptr = this_group.buckets[j].load_consume(guard);
+
+                        if this_bucket_ptr.tag() & SENTINEL_TAG != 0 {
+                            assert!(this_bucket_ptr.is_null());
+
+                            return Err(RelocatedError);
+                        }
+
+                        assert!(!this_bucket_ptr.is_null());
+                        let this_bucket_ref = unsafe { this_bucket_ptr.deref() };
+
+                        if this_bucket_ref.key.borrow() != key {
+                            continue;
+                        }
+
+                        if this_bucket_ptr.tag() & TOMBSTONE_TAG != 0 {
+                            return Ok(Shared::null());
+                        }
+
+                        return Ok(this_bucket_ptr);
+                    }
+
+                    if zero_move_mask != 0 {
+                        return Ok(Shared::null());
+                    }
+                }
             }
-
-            let result_ptr = if this_bucket_ptr.tag() & TOMBSTONE_TAG == 0 {
-                this_bucket_ptr
-            } else {
-                Shared::null()
-            };
-
-            ProbeLoopAction::Return(result_ptr)
-        });
-
-        match loop_result {
-            ProbeLoopResult::Returned(t) => Ok(t),
-            ProbeLoopResult::LoopEnded => Ok(Shared::null()),
-            ProbeLoopResult::FoundSentinelTag => Err(RelocatedError),
         }
+
+        Ok(Shared::null())
     }
 
     pub(crate) fn insert(
         &self,
         guard: &'g Guard,
         hash: u64,
-        bucket_ptr: Owned<Bucket<K, V>>,
+        mut bucket_ptr: Owned<Bucket<K, V>>,
     ) -> Result<Shared<'g, Bucket<K, V>>, Owned<Bucket<K, V>>> {
-        let mut maybe_bucket_ptr = Some(bucket_ptr);
+        let (control, index) = split_hash(hash);
+        let offset = index & self.modulo_mask;
 
-        let loop_result = self.probe_loop(guard, hash, |_, this_bucket, this_bucket_ptr| {
-            let bucket_ptr = maybe_bucket_ptr.take().unwrap();
-            let key = &bucket_ptr.key;
+        let searcher = Searcher::new(control);
 
-            if let Some(Bucket { key: this_key, .. }) = unsafe { this_bucket_ptr.as_ref() } {
-                if this_key != key {
-                    maybe_bucket_ptr = Some(bucket_ptr);
+        for i in (0..self.control_bytes.len()).map(|i| i.wrapping_add(offset) & self.modulo_mask) {
+            let this_group = &self.groups[i];
+            let these_control_bytes = self.control_bytes[i].load();
 
-                    return ProbeLoopAction::Continue;
+            let (mut zero_move_mask, mut query_move_mask) =
+                if let Some((z, q)) = searcher.search(these_control_bytes) {
+                    (z, q)
+                } else {
+                    return Err(bucket_ptr);
+                };
+
+            match (zero_move_mask, query_move_mask) {
+                (0, 0) => continue, // no zeros and no matches; keep probing
+                _ => {
+                    while query_move_mask != 0 || zero_move_mask != 0 {
+                        let query_tz = query_move_mask.trailing_zeros();
+                        let zeros_tz = zero_move_mask.trailing_zeros();
+
+                        assert_ne!(zeros_tz, query_tz);
+
+                        let (j, expected) = if zeros_tz < query_tz {
+                            zero_move_mask &= !(1 << zeros_tz);
+
+                            (zeros_tz as usize, 0)
+                        } else {
+                            query_move_mask &= !(1 << query_tz);
+
+                            (query_tz as usize, control)
+                        };
+
+                        loop {
+                            let this_bucket_ptr = this_group.buckets[j].load_consume(guard);
+
+                            if this_bucket_ptr.tag() & SENTINEL_TAG != 0 {
+                                assert!(this_bucket_ptr.is_null());
+
+                                return Err(bucket_ptr);
+                            }
+
+                            if let Some(this_bucket_ref) = unsafe { this_bucket_ptr.as_ref() } {
+                                if this_bucket_ref.key != bucket_ptr.key {
+                                    break;
+                                }
+                            } else {
+                                assert_eq!(this_bucket_ptr.tag() & TOMBSTONE_TAG, 0);
+                            }
+
+                            match this_group.buckets[j].compare_and_set_weak(
+                                this_bucket_ptr,
+                                bucket_ptr,
+                                (Ordering::Release, Ordering::Relaxed),
+                                guard,
+                            ) {
+                                Ok(_) => {
+                                    self.control_bytes[i].set(expected, j as u32, control);
+
+                                    return Ok(this_bucket_ptr);
+                                }
+                                Err(CompareAndSetError { new, .. }) => {
+                                    bucket_ptr = new;
+                                }
+                            }
+                        }
+                    }
                 }
             }
+        }
 
-            match this_bucket.compare_and_set_weak(
-                this_bucket_ptr,
-                bucket_ptr,
-                (Ordering::Release, Ordering::Relaxed),
-                guard,
-            ) {
-                Ok(_) => ProbeLoopAction::Return(this_bucket_ptr),
-                Err(CompareAndSetError { new, .. }) => {
-                    maybe_bucket_ptr = Some(new);
-
-                    ProbeLoopAction::Reload
-                }
-            }
-        });
-
-        loop_result
-            .returned()
-            .ok_or_else(|| maybe_bucket_ptr.unwrap())
+        Err(bucket_ptr)
     }
 
     pub(crate) fn remove_if<Q: ?Sized + Eq, F: FnMut(&K, &V) -> bool>(
@@ -154,46 +287,7 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
     where
         K: Borrow<Q>,
     {
-        let loop_result = self.probe_loop(guard, hash, |_, this_bucket, this_bucket_ptr| {
-            let this_bucket_ref = if let Some(this_bucket_ref) = unsafe { this_bucket_ptr.as_ref() }
-            {
-                this_bucket_ref
-            } else {
-                return ProbeLoopAction::Return(Shared::null());
-            };
-
-            let this_key = &this_bucket_ref.key;
-
-            if this_key.borrow() != key {
-                return ProbeLoopAction::Continue;
-            } else if this_bucket_ptr.tag() & TOMBSTONE_TAG != 0 {
-                return ProbeLoopAction::Return(Shared::null());
-            }
-
-            let this_value = unsafe { &*this_bucket_ref.maybe_value.as_ptr() };
-
-            if !condition(this_key, this_value) {
-                return ProbeLoopAction::Return(Shared::null());
-            }
-
-            let new_bucket_ptr = this_bucket_ptr.with_tag(TOMBSTONE_TAG);
-
-            match this_bucket.compare_and_set_weak(
-                this_bucket_ptr,
-                new_bucket_ptr,
-                (Ordering::Release, Ordering::Relaxed),
-                guard,
-            ) {
-                Ok(_) => ProbeLoopAction::Return(new_bucket_ptr),
-                Err(_) => ProbeLoopAction::Reload,
-            }
-        });
-
-        match loop_result {
-            ProbeLoopResult::Returned(t) => Ok(t),
-            ProbeLoopResult::LoopEnded => Ok(Shared::null()),
-            ProbeLoopResult::FoundSentinelTag => Err(condition),
-        }
+        unimplemented!()
     }
 
     pub(crate) fn modify<F: FnMut(&K, &V) -> V>(
@@ -203,54 +297,7 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         key_or_owned_bucket: KeyOrOwnedBucket<K, V>,
         mut modifier: F,
     ) -> Result<Shared<'g, Bucket<K, V>>, (KeyOrOwnedBucket<K, V>, F)> {
-        let mut maybe_key_or_owned_bucket = Some(key_or_owned_bucket);
-
-        let loop_result = self.probe_loop(guard, hash, |_, this_bucket, this_bucket_ptr| {
-            let key_or_owned_bucket = maybe_key_or_owned_bucket.take().unwrap();
-
-            let this_bucket_ref = if let Some(this_bucket_ref) = unsafe { this_bucket_ptr.as_ref() }
-            {
-                this_bucket_ref
-            } else {
-                maybe_key_or_owned_bucket = Some(key_or_owned_bucket);
-
-                return ProbeLoopAction::Return(Shared::null());
-            };
-
-            let this_key = &this_bucket_ref.key;
-            let key = key_or_owned_bucket.key();
-
-            if key != this_key {
-                maybe_key_or_owned_bucket = Some(key_or_owned_bucket);
-
-                return ProbeLoopAction::Continue;
-            }
-
-            if this_bucket_ptr.tag() & TOMBSTONE_TAG == 0 {
-                let this_value = unsafe { &*this_bucket_ref.maybe_value.as_ptr() };
-                let new_value = modifier(this_key, this_value);
-                let new_bucket = key_or_owned_bucket.into_bucket(new_value);
-
-                if let Err(CompareAndSetError { new, .. }) = this_bucket.compare_and_set_weak(
-                    this_bucket_ptr,
-                    new_bucket,
-                    (Ordering::Release, Ordering::Relaxed),
-                    guard,
-                ) {
-                    maybe_key_or_owned_bucket = Some(KeyOrOwnedBucket::OwnedBucket(new));
-
-                    ProbeLoopAction::Reload
-                } else {
-                    ProbeLoopAction::Return(this_bucket_ptr)
-                }
-            } else {
-                ProbeLoopAction::Return(Shared::null())
-            }
-        });
-
-        loop_result
-            .returned()
-            .ok_or_else(|| (maybe_key_or_owned_bucket.unwrap(), modifier))
+        unimplemented!()
     }
 
     pub(crate) fn insert_or_modify<F: FnOnce() -> V, G: FnMut(&K, &V) -> V>(
@@ -260,55 +307,7 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         state: InsertOrModifyState<K, V, F>,
         mut modifier: G,
     ) -> Result<Shared<'g, Bucket<K, V>>, (InsertOrModifyState<K, V, F>, G)> {
-        let mut maybe_state = Some(state);
-
-        let loop_result = self.probe_loop(guard, hash, |_, this_bucket, this_bucket_ptr| {
-            let state = maybe_state.take().unwrap();
-
-            let (new_bucket, maybe_insert_value) =
-                if let Some(this_bucket_ref) = unsafe { this_bucket_ptr.as_ref() } {
-                    let this_key = &this_bucket_ref.key;
-
-                    if this_key != state.key() {
-                        maybe_state = Some(state);
-
-                        return ProbeLoopAction::Continue;
-                    }
-
-                    if this_bucket_ptr.tag() & TOMBSTONE_TAG == 0 {
-                        let this_value = unsafe { &*this_bucket_ref.maybe_value.as_ptr() };
-                        let new_value = modifier(this_key, this_value);
-
-                        let (new_bucket, insert_value) = state.into_modify_bucket(new_value);
-
-                        (new_bucket, Some(insert_value))
-                    } else {
-                        (state.into_insert_bucket(), None)
-                    }
-                } else {
-                    (state.into_insert_bucket(), None)
-                };
-
-            if let Err(CompareAndSetError { new, .. }) = this_bucket.compare_and_set_weak(
-                this_bucket_ptr,
-                new_bucket,
-                (Ordering::Release, Ordering::Relaxed),
-                guard,
-            ) {
-                maybe_state = Some(InsertOrModifyState::from_bucket_value(
-                    new,
-                    maybe_insert_value,
-                ));
-
-                ProbeLoopAction::Reload
-            } else {
-                ProbeLoopAction::Return(this_bucket_ptr)
-            }
-        });
-
-        loop_result
-            .returned()
-            .ok_or_else(|| (maybe_state.unwrap(), modifier))
+        unimplemented!()
     }
 
     fn insert_for_grow(
@@ -317,153 +316,23 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         hash: u64,
         bucket_ptr: Shared<'g, Bucket<K, V>>,
     ) -> Option<usize> {
-        assert!(!bucket_ptr.is_null());
-        assert_eq!(bucket_ptr.tag() & SENTINEL_TAG, 0);
-        assert_ne!(bucket_ptr.tag() & BORROWED_TAG, 0);
-
-        let key = &unsafe { bucket_ptr.deref() }.key;
-
-        let loop_result = self.probe_loop(guard, hash, |i, this_bucket, this_bucket_ptr| {
-            if let Some(Bucket { key: this_key, .. }) = unsafe { this_bucket_ptr.as_ref() } {
-                if this_bucket_ptr == bucket_ptr {
-                    return ProbeLoopAction::Return(None);
-                } else if this_key != key {
-                    return ProbeLoopAction::Continue;
-                } else if this_bucket_ptr.tag() & BORROWED_TAG == 0 {
-                    return ProbeLoopAction::Return(None);
-                }
-            }
-
-            if this_bucket_ptr.is_null() && bucket_ptr.tag() & TOMBSTONE_TAG != 0 {
-                ProbeLoopAction::Return(None)
-            } else if this_bucket
-                .compare_and_set_weak(
-                    this_bucket_ptr,
-                    bucket_ptr,
-                    (Ordering::Release, Ordering::Relaxed),
-                    guard,
-                )
-                .is_ok()
-            {
-                ProbeLoopAction::Return(Some(i))
-            } else {
-                ProbeLoopAction::Reload
-            }
-        });
-
-        loop_result.returned().flatten()
+        unimplemented!()
     }
 }
 
-impl<'g, K: 'g, V: 'g> BucketArray<K, V> {
-    fn probe_loop<
-        F: FnMut(usize, &Atomic<Bucket<K, V>>, Shared<'g, Bucket<K, V>>) -> ProbeLoopAction<T>,
-        T,
-    >(
-        &self,
-        guard: &'g Guard,
-        hash: u64,
-        mut f: F,
-    ) -> ProbeLoopResult<T> {
-        let offset = hash as usize & (self.buckets.len() - 1);
-
-        for i in
-            (0..self.buckets.len()).map(|i| (i.wrapping_add(offset)) & (self.buckets.len() - 1))
-        {
-            let this_bucket = &self.buckets[i];
-
-            loop {
-                let this_bucket_ptr = this_bucket.load_consume(guard);
-
-                if this_bucket_ptr.tag() & SENTINEL_TAG != 0 {
-                    return ProbeLoopResult::FoundSentinelTag;
-                }
-
-                match f(i, this_bucket, this_bucket_ptr) {
-                    ProbeLoopAction::Continue => break,
-                    ProbeLoopAction::Reload => (),
-                    ProbeLoopAction::Return(t) => return ProbeLoopResult::Returned(t),
-                }
-            }
-        }
-
-        ProbeLoopResult::LoopEnded
-    }
-
+impl<'g, K: 'g, V: 'g> BucketPointerArray<K, V> {
     pub(crate) fn rehash<H: BuildHasher>(
         &self,
         guard: &'g Guard,
         build_hasher: &H,
-    ) -> &'g BucketArray<K, V>
+    ) -> &'g BucketPointerArray<K, V>
     where
         K: Hash + Eq,
     {
-        let next_array = self.next_array(guard);
-        assert!(self.buckets.len() <= next_array.buckets.len());
-
-        for this_bucket in self.buckets.iter() {
-            let mut maybe_state: Option<(usize, Shared<'g, Bucket<K, V>>)> = None;
-
-            loop {
-                let this_bucket_ptr = this_bucket.load_consume(guard);
-
-                if this_bucket_ptr.tag() & SENTINEL_TAG != 0 {
-                    break;
-                }
-
-                let to_put_ptr = this_bucket_ptr.with_tag(this_bucket_ptr.tag() | BORROWED_TAG);
-
-                if let Some((index, mut next_bucket_ptr)) = maybe_state {
-                    assert!(!this_bucket_ptr.is_null());
-
-                    let next_bucket = &next_array.buckets[index];
-
-                    while next_bucket_ptr.tag() & BORROWED_TAG != 0
-                        && next_bucket
-                            .compare_and_set_weak(
-                                next_bucket_ptr,
-                                to_put_ptr,
-                                (Ordering::Release, Ordering::Relaxed),
-                                guard,
-                            )
-                            .is_err()
-                    {
-                        next_bucket_ptr = next_bucket.load_consume(guard);
-                    }
-                } else if let Some(this_bucket_ref) = unsafe { this_bucket_ptr.as_ref() } {
-                    let key = &this_bucket_ref.key;
-                    let hash = hash(build_hasher, key);
-
-                    if let Some(index) = next_array.insert_for_grow(guard, hash, to_put_ptr) {
-                        maybe_state = Some((index, to_put_ptr));
-                    }
-                }
-
-                if this_bucket
-                    .compare_and_set_weak(
-                        this_bucket_ptr,
-                        Shared::null().with_tag(SENTINEL_TAG),
-                        (Ordering::Release, Ordering::Relaxed),
-                        guard,
-                    )
-                    .is_ok()
-                {
-                    if !this_bucket_ptr.is_null()
-                        && this_bucket_ptr.tag() & TOMBSTONE_TAG != 0
-                        && maybe_state.is_none()
-                    {
-                        unsafe { defer_destroy_bucket(guard, this_bucket_ptr) };
-                    }
-
-                    break;
-                }
-            }
-        }
-
-        next_array
+        unimplemented!()
     }
 
-    fn next_array(&self, guard: &'g Guard) -> &'g BucketArray<K, V> {
+    fn next_array(&self, guard: &'g Guard) -> &'g BucketPointerArray<K, V> {
         let mut maybe_new_next = None;
 
         loop {
@@ -474,9 +343,9 @@ impl<'g, K: 'g, V: 'g> BucketArray<K, V> {
             }
 
             let new_next = maybe_new_next.unwrap_or_else(|| {
-                Owned::new(BucketArray::with_length(
+                Owned::new(BucketPointerArray::with_length(
                     self.epoch + 1,
-                    self.buckets.len() * 2,
+                    self.groups.len() * 2,
                 ))
             });
 
@@ -710,7 +579,7 @@ mod tests {
     #[test]
     fn get_insert_remove() {
         let build_hasher = RandomState::new();
-        let buckets = BucketArray::with_length(0, 16);
+        let buckets = BucketPointerArray::with_length(0, 16);
         let guard = unsafe { &crossbeam_epoch::unprotected() };
 
         let k1 = "foo";
@@ -776,7 +645,7 @@ mod tests {
         assert_eq!(buckets.get(guard, h2, k2), Ok(Shared::null()));
         assert_eq!(buckets.get(guard, h3, k3), Ok(Shared::null()));
 
-        for this_bucket in buckets.buckets.iter() {
+        for this_bucket in buckets.groups.iter().map(|g| g.buckets.iter()).flatten() {
             let this_bucket_ptr = this_bucket.swap(Shared::null(), Ordering::Relaxed, guard);
 
             if this_bucket_ptr.is_null() {
