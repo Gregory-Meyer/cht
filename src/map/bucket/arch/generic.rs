@@ -55,6 +55,11 @@ impl ControlBytes {
             };
         }
     }
+
+    pub(crate) fn set_sentinel(&self, index: usize) {
+        let addr = unsafe { &*(&self.bytes as *const _ as *const AtomicU8).add(index) };
+        addr.store(super::SENTINEL_CONTROL_BYTE, Ordering::Relaxed);
+    }
 }
 
 pub(crate) struct Searcher {
