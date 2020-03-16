@@ -98,6 +98,8 @@
 pub mod map;
 pub mod segment;
 
+pub(crate) mod common;
+
 #[cfg(test)]
 #[macro_use]
 pub(crate) mod test_util;

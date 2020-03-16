@@ -33,17 +33,17 @@ use std::arch::x86 as stdarch;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64 as stdarch;
 
-use stdarch::__m128i;
+use stdarch::__m256i;
 
-pub(crate) const BUCKETS_PER_GROUP: usize = 16;
+pub(crate) const BUCKETS_PER_GROUP: usize = 32;
 
-pub(crate) struct ControlBytes {
-    bytes: UnsafeCell<__m128i>,
+pub(crate) struct ControlByteGroup {
+    bytes: UnsafeCell<__m256i>,
 }
 
-impl ControlBytes {
-    pub(crate) fn load(&self) -> __m128i {
-        unsafe { stdarch::_mm_load_si128(self.bytes.get()) }
+impl ControlByteGroup {
+    pub(crate) fn load(&self) -> __m256i {
+        unsafe { stdarch::_mm256_load_si256(self.bytes.get()) }
     }
 
     pub(crate) fn set(&self, mut current: u8, index: u32, value: u8) {
@@ -72,37 +72,38 @@ impl ControlBytes {
     }
 }
 
-unsafe impl Send for ControlBytes {}
-unsafe impl Sync for ControlBytes {}
+unsafe impl Send for ControlByteGroup {}
+unsafe impl Sync for ControlByteGroup {}
 
 pub(crate) struct Searcher {
-    sentinel: __m128i,
-    zero: __m128i,
-    query: __m128i,
+    sentinel: __m256i,
+    zero: __m256i,
+    query: __m256i,
 }
 
 impl Searcher {
     pub(crate) fn new(query: u8) -> Self {
         Self {
-            sentinel: unsafe { stdarch::_mm_set1_epi8(super::SENTINEL_TAG as i8) },
-            zero: unsafe { stdarch::_mm_setzero_si128() },
-            query: unsafe { stdarch::_mm_set1_epi8(query as i8) },
+            sentinel: unsafe { stdarch::_mm256_set1_epi8(super::SENTINEL_CONTROL_BYTE as i8) },
+            zero: unsafe { stdarch::_mm256_setzero_si256() },
+            query: unsafe { stdarch::_mm256_set1_epi8(query as i8) },
         }
     }
 
-    pub(crate) fn search(&self, bytes: __m128i) -> Option<(u32, u32)> {
-        let sentinel_move_mask =
-            unsafe { stdarch::_mm_movemask_epi8(stdarch::_mm_cmpeq_epi8(bytes, self.sentinel)) }
-                as u32;
+    pub(crate) fn search(&self, bytes: __m256i) -> Option<(u32, u32)> {
+        let sentinel_move_mask = unsafe {
+            stdarch::_mm256_movemask_epi8(stdarch::_mm256_cmpeq_epi8(bytes, self.sentinel))
+        } as u32;
 
         if sentinel_move_mask != 0 {
             return None;
         }
 
         let zero_move_mask =
-            unsafe { stdarch::_mm_movemask_epi8(stdarch::_mm_cmpeq_epi8(bytes, self.zero)) } as u32;
+            unsafe { stdarch::_mm256_movemask_epi8(stdarch::_mm256_cmpeq_epi8(bytes, self.zero)) }
+                as u32;
         let query_move_mask =
-            unsafe { stdarch::_mm_movemask_epi8(stdarch::_mm_cmpeq_epi8(bytes, self.query)) }
+            unsafe { stdarch::_mm256_movemask_epi8(stdarch::_mm256_cmpeq_epi8(bytes, self.query)) }
                 as u32;
 
         Some((zero_move_mask, query_move_mask))

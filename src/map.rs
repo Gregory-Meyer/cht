@@ -25,11 +25,7 @@
 //! A lockfree hash map implemented with bucket pointer arrays, open addressing,
 //! and linear probing.
 
-pub(crate) mod bucket;
-pub(crate) mod bucket_pointer_array_ref;
-
-use bucket::BucketPointerArray;
-use bucket_pointer_array_ref::BucketPointerArrayRef;
+use crate::common::{self, Table, TableFacade};
 
 use std::{
     borrow::Borrow,
@@ -82,7 +78,7 @@ pub type DefaultHashBuilder = RandomState;
 /// [`RefCell`]: https://doc.rust-lang.org/std/cell/struct.RefCell.html
 #[derive(Default)]
 pub struct HashMap<K, V, S = DefaultHashBuilder> {
-    bucket_pointer_array: Atomic<bucket::BucketPointerArray<K, V>>,
+    table: Atomic<Table<K, V>>,
     build_hasher: S,
     len: AtomicUsize,
 }
@@ -123,14 +119,14 @@ impl<K, V, S> HashMap<K, V, S> {
     /// reallocating its bucket pointer array. If `capacity` is 0, the hash map
     /// will not allocate.
     pub fn with_capacity_and_hasher(capacity: usize, build_hasher: S) -> HashMap<K, V, S> {
-        let bucket_pointer_array = if capacity == 0 {
+        let table = if capacity == 0 {
             Atomic::null()
         } else {
-            Atomic::new(BucketPointerArray::with_capacity(capacity))
+            Atomic::new(Table::with_capacity(capacity))
         };
 
         Self {
-            bucket_pointer_array,
+            table,
             build_hasher,
             len: AtomicUsize::new(0),
         }
@@ -169,10 +165,10 @@ impl<K, V, S> HashMap<K, V, S> {
     pub fn capacity(&self) -> usize {
         let guard = &crossbeam_epoch::pin();
 
-        let bucket_pointer_array_ptr = self.bucket_pointer_array.load_consume(guard);
+        let table_ptr = self.table.load_consume(guard);
 
-        unsafe { bucket_pointer_array_ptr.as_ref() }
-            .map(BucketPointerArray::capacity)
+        unsafe { table_ptr.as_ref() }
+            .map(Table::capacity)
             .unwrap_or(0)
     }
 
@@ -259,10 +255,9 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
-        let hash = bucket::hash(&self.build_hasher, &key);
+        let hash = common::hash(&self.build_hasher, &key);
 
-        self.bucket_pointer_array_ref()
-            .get_key_value_and(key, hash, with_entry)
+        self.table_facade().get_key_value_and(key, hash, with_entry)
     }
 
     /// Inserts a key-value pair into the map, returning a clone of the value
@@ -321,9 +316,9 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         value: V,
         with_previous_entry: F,
     ) -> Option<T> {
-        let hash = bucket::hash(&self.build_hasher, &key);
+        let hash = common::hash(&self.build_hasher, &key);
 
-        self.bucket_pointer_array_ref()
+        self.table_facade()
             .insert_entry_and(key, hash, value, with_previous_entry)
     }
 
@@ -517,14 +512,10 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
-        let hash = bucket::hash(&self.build_hasher, &key);
+        let hash = common::hash(&self.build_hasher, &key);
 
-        self.bucket_pointer_array_ref().remove_entry_if_and(
-            key,
-            hash,
-            condition,
-            with_previous_entry,
-        )
+        self.table_facade()
+            .remove_entry_if_and(key, hash, condition, with_previous_entry)
     }
 
     /// If no value corresponds to the key, insert a new key-value pair into
@@ -731,10 +722,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         on_modify: G,
         with_old_entry: H,
     ) -> Option<T> {
-        let hash = bucket::hash(&self.build_hasher, &key);
+        let hash = common::hash(&self.build_hasher, &key);
 
-        self.bucket_pointer_array_ref()
-            .insert_with_or_modify_entry_and(key, hash, on_insert, on_modify, with_old_entry)
+        self.table_facade().insert_with_or_modify_entry_and(
+            key,
+            hash,
+            on_insert,
+            on_modify,
+            with_old_entry,
+        )
     }
 
     /// Modifies the value corresponding to a key, returning a clone of the
@@ -781,18 +777,18 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         on_modify: F,
         with_old_entry: G,
     ) -> Option<T> {
-        let hash = bucket::hash(&self.build_hasher, &key);
+        let hash = common::hash(&self.build_hasher, &key);
 
-        self.bucket_pointer_array_ref()
+        self.table_facade()
             .modify_entry_and(key, hash, on_modify, with_old_entry)
     }
 }
 
 impl<K, V, S> HashMap<K, V, S> {
     #[inline]
-    fn bucket_pointer_array_ref(&'_ self) -> BucketPointerArrayRef<'_, K, V, S> {
-        BucketPointerArrayRef {
-            bucket_pointer_array: &self.bucket_pointer_array,
+    fn table_facade(&'_ self) -> TableFacade<'_, K, V, S> {
+        TableFacade {
+            table: &self.table,
             build_hasher: &self.build_hasher,
             len: &self.len,
         }
@@ -801,34 +797,9 @@ impl<K, V, S> HashMap<K, V, S> {
 
 impl<K, V, S> Drop for HashMap<K, V, S> {
     fn drop(&mut self) {
-        let guard = unsafe { &crossbeam_epoch::unprotected() };
         atomic::fence(Ordering::Acquire);
 
-        let mut current_ptr = self.bucket_pointer_array.load(Ordering::Relaxed, guard);
-
-        while let Some(current_ref) = unsafe { current_ptr.as_ref() } {
-            let next_ptr = current_ref.next.load(Ordering::Relaxed, guard);
-
-            for this_bucket_ptr in current_ref
-                .groups
-                .iter()
-                .map(|g| g.buckets.iter())
-                .flatten()
-                .map(|b| b.load(Ordering::Relaxed, guard))
-                .filter(|p| !p.is_null())
-                .filter(|p| next_ptr.is_null() || p.tag() & bucket::TOMBSTONE_TAG == 0)
-            {
-                // only delete tombstones from the newest bucket array
-                // the only way this becomes a memory leak is if there was a panic during a rehash,
-                // in which case i'm going to say that running destructors and freeing memory is
-                // best-effort, and my best effort is to not do it
-                unsafe { bucket::defer_acquire_destroy(guard, this_bucket_ptr) };
-            }
-
-            unsafe { bucket::defer_acquire_destroy(guard, current_ptr) };
-
-            current_ptr = next_ptr;
-        }
+        unsafe { self.table_facade().drop() };
     }
 }
 

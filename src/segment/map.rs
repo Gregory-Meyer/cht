@@ -25,11 +25,9 @@
 //! A lockfree hash map implemented with segmented bucket pointer arrays, open
 //! addressing, and linear probing.
 
-use crate::map::{
-    bucket::{self, BucketPointerArray},
-    bucket_pointer_array_ref::BucketPointerArrayRef,
-    DefaultHashBuilder,
-};
+use crate::map::DefaultHashBuilder;
+
+use crate::common::{self, Table, TableFacade};
 
 use std::{
     borrow::Borrow,
@@ -246,7 +244,7 @@ impl<K, V, S> HashMap<K, V, S> {
         } else {
             for _ in 0..actual_num_segments {
                 segments.push(Segment {
-                    bucket_pointer_array: Atomic::new(BucketPointerArray::with_capacity(capacity)),
+                    table: Atomic::new(Table::with_capacity(capacity)),
                     len: AtomicUsize::new(0),
                 });
             }
@@ -297,9 +295,9 @@ impl<K, V, S> HashMap<K, V, S> {
 
         self.segments
             .iter()
-            .map(|s| s.bucket_pointer_array.load_consume(guard))
+            .map(|s| s.table.load_consume(guard))
             .map(|p| unsafe { p.as_ref() })
-            .map(|a| a.map(BucketPointerArray::capacity).unwrap_or(0))
+            .map(|a| a.map(Table::capacity).unwrap_or(0))
             .min()
             .unwrap()
     }
@@ -326,14 +324,9 @@ impl<K, V, S> HashMap<K, V, S> {
 
         let guard = &crossbeam_epoch::pin();
 
-        unsafe {
-            self.segments[index]
-                .bucket_pointer_array
-                .load_consume(guard)
-                .as_ref()
-        }
-        .map(BucketPointerArray::capacity)
-        .unwrap_or(0)
+        unsafe { self.segments[index].table.load_consume(guard).as_ref() }
+            .map(Table::capacity)
+            .unwrap_or(0)
     }
 
     /// Returns the number of segments in the map.
@@ -349,7 +342,7 @@ impl<K, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
-        let hash = bucket::hash(&self.build_hasher, key);
+        let hash = common::hash(&self.build_hasher, key);
 
         self.segment_index_from_hash(hash)
     }
@@ -430,9 +423,9 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
-        let hash = bucket::hash(&self.build_hasher, &key);
+        let hash = common::hash(&self.build_hasher, &key);
 
-        self.bucket_pointer_array_ref(hash)
+        self.table_facade(hash)
             .get_key_value_and(key, hash, with_entry)
     }
 
@@ -492,14 +485,11 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         value: V,
         with_previous_entry: F,
     ) -> Option<T> {
-        let hash = bucket::hash(&self.build_hasher, &key);
+        let hash = common::hash(&self.build_hasher, &key);
 
-        let result = self.bucket_pointer_array_ref(hash).insert_entry_and(
-            key,
-            hash,
-            value,
-            with_previous_entry,
-        );
+        let result =
+            self.table_facade(hash)
+                .insert_entry_and(key, hash, value, with_previous_entry);
 
         if result.is_none() {
             self.len.fetch_add(1, Ordering::Relaxed);
@@ -698,18 +688,14 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     where
         K: Borrow<Q>,
     {
-        let hash = bucket::hash(&self.build_hasher, &key);
+        let hash = common::hash(&self.build_hasher, &key);
 
-        self.bucket_pointer_array_ref(hash).remove_entry_if_and(
-            key,
-            hash,
-            condition,
-            move |k, v| {
+        self.table_facade(hash)
+            .remove_entry_if_and(key, hash, condition, move |k, v| {
                 self.len.fetch_sub(1, Ordering::Relaxed);
 
                 with_previous_entry(k, v)
-            },
-        )
+            })
     }
 
     /// If no value corresponds to the key, insert a new key-value pair into
@@ -916,11 +902,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         on_modify: G,
         with_old_entry: H,
     ) -> Option<T> {
-        let hash = bucket::hash(&self.build_hasher, &key);
+        let hash = common::hash(&self.build_hasher, &key);
 
-        let result = self
-            .bucket_pointer_array_ref(hash)
-            .insert_with_or_modify_entry_and(key, hash, on_insert, on_modify, with_old_entry);
+        let result = self.table_facade(hash).insert_with_or_modify_entry_and(
+            key,
+            hash,
+            on_insert,
+            on_modify,
+            with_old_entry,
+        );
 
         if result.is_none() {
             self.len.fetch_add(1, Ordering::Relaxed);
@@ -973,9 +963,9 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
         on_modify: F,
         with_old_entry: G,
     ) -> Option<T> {
-        let hash = bucket::hash(&self.build_hasher, &key);
+        let hash = common::hash(&self.build_hasher, &key);
 
-        self.bucket_pointer_array_ref(hash)
+        self.table_facade(hash)
             .modify_entry_and(key, hash, on_modify, with_old_entry)
     }
 }
@@ -989,55 +979,30 @@ impl<K, V, S: Default> Default for HashMap<K, V, S> {
 
 impl<K, V, S> Drop for HashMap<K, V, S> {
     fn drop(&mut self) {
-        let guard = unsafe { &crossbeam_epoch::unprotected() };
         atomic::fence(Ordering::Acquire);
 
-        for Segment {
-            bucket_pointer_array: this_bucket_pointer_array,
-            ..
-        } in self.segments.iter()
-        {
-            let mut current_ptr = this_bucket_pointer_array.load(Ordering::Relaxed, guard);
-
-            while let Some(current_ref) = unsafe { current_ptr.as_ref() } {
-                let next_ptr = current_ref.next.load(Ordering::Relaxed, guard);
-
-                for this_bucket_ptr in current_ref
-                    .groups
-                    .iter()
-                    .map(|g| g.buckets.iter())
-                    .flatten()
-                    .map(|b| b.load(Ordering::Relaxed, guard))
-                    .filter(|p| !p.is_null())
-                    .filter(|p| next_ptr.is_null() || p.tag() & bucket::TOMBSTONE_TAG == 0)
-                {
-                    // only delete tombstones from the newest bucket array
-                    // the only way this becomes a memory leak is if there was a panic during a rehash,
-                    // in which case i'm going to say that running destructors and freeing memory is
-                    // best-effort, and my best effort is to not do it
-                    unsafe { bucket::defer_acquire_destroy(guard, this_bucket_ptr) };
+        for Segment { table, len } in self.segments.iter() {
+            unsafe {
+                TableFacade {
+                    table,
+                    build_hasher: &self.build_hasher,
+                    len,
                 }
-
-                unsafe { bucket::defer_acquire_destroy(guard, current_ptr) };
-
-                current_ptr = next_ptr;
-            }
+                .drop()
+            };
         }
     }
 }
 
 impl<K, V, S> HashMap<K, V, S> {
     #[inline]
-    fn bucket_pointer_array_ref(&'_ self, hash: u64) -> BucketPointerArrayRef<'_, K, V, S> {
+    fn table_facade(&'_ self, hash: u64) -> TableFacade<'_, K, V, S> {
         let index = self.segment_index_from_hash(hash);
 
-        let Segment {
-            ref bucket_pointer_array,
-            ref len,
-        } = self.segments[index];
+        let Segment { ref table, ref len } = self.segments[index];
 
-        BucketPointerArrayRef {
-            bucket_pointer_array,
+        TableFacade {
+            table,
             build_hasher: &self.build_hasher,
             len,
         }
@@ -1054,7 +1019,7 @@ impl<K, V, S> HashMap<K, V, S> {
 }
 
 struct Segment<K, V> {
-    bucket_pointer_array: Atomic<BucketPointerArray<K, V>>,
+    table: Atomic<Table<K, V>>,
     len: AtomicUsize,
 }
 

@@ -23,33 +23,23 @@
 // SOFTWARE.
 
 use std::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicU8, Ordering},
+    mem,
+    sync::atomic::{AtomicU64, AtomicU8, Ordering},
 };
 
-#[cfg(target_arch = "x86")]
-use std::arch::x86 as stdarch;
+pub(crate) const BUCKETS_PER_GROUP: usize = 8;
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64 as stdarch;
-
-use stdarch::__m256i;
-
-pub(crate) const BUCKETS_PER_GROUP: usize = 32;
-
-pub(crate) struct ControlBytes {
-    bytes: UnsafeCell<__m256i>,
+pub(crate) struct ControlByteGroup {
+    bytes: AtomicU64,
 }
 
-impl ControlBytes {
-    pub(crate) fn load(&self) -> __m256i {
-        unsafe { stdarch::_mm256_load_si256(self.bytes.get()) }
+impl ControlByteGroup {
+    pub(crate) fn load(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
     }
 
     pub(crate) fn set(&self, mut current: u8, index: u32, value: u8) {
-        let addr = unsafe {
-            &*((self.bytes.get() as *const u8).offset(index as isize) as *const AtomicU8)
-        };
+        let addr = unsafe { &*(&self.bytes as *const _ as *const AtomicU8).offset(index as isize) };
 
         loop {
             if current == super::SENTINEL_CONTROL_BYTE || current == value {
@@ -67,45 +57,62 @@ impl ControlBytes {
     }
 
     pub(crate) fn set_sentinel(&self, index: usize) {
-        let addr = unsafe { &*((self.bytes.get() as *const u8).add(index) as *const AtomicU8) };
+        let addr = unsafe { &*(&self.bytes as *const _ as *const AtomicU8).add(index) };
         addr.store(super::SENTINEL_CONTROL_BYTE, Ordering::Relaxed);
     }
 }
 
-unsafe impl Send for ControlBytes {}
-unsafe impl Sync for ControlBytes {}
-
 pub(crate) struct Searcher {
-    sentinel: __m256i,
-    zero: __m256i,
-    query: __m256i,
+    query: u8,
 }
 
 impl Searcher {
     pub(crate) fn new(query: u8) -> Self {
-        Self {
-            sentinel: unsafe { stdarch::_mm256_set1_epi8(super::SENTINEL_TAG as i8) },
-            zero: unsafe { stdarch::_mm256_setzero_si256() },
-            query: unsafe { stdarch::_mm256_set1_epi8(query as i8) },
-        }
+        Self { query }
     }
 
-    pub(crate) fn search(&self, bytes: __m256i) -> Option<(u32, u32)> {
-        let sentinel_move_mask = unsafe {
-            stdarch::_mm256_movemask_epi8(stdarch::_mm256_cmpeq_epi8(bytes, self.sentinel))
-        } as u32;
-
-        if sentinel_move_mask != 0 {
+    pub(crate) fn search(&self, bytes: u64) -> Option<(u32, u32)> {
+        if has_byte(bytes, super::SENTINEL_CONTROL_BYTE) {
             return None;
         }
 
-        let zero_move_mask =
-            unsafe { stdarch::_mm256_movemask_epi8(stdarch::_mm256_cmpeq_epi8(bytes, self.zero)) }
-                as u32;
-        let query_move_mask =
-            unsafe { stdarch::_mm256_movemask_epi8(stdarch::_mm256_cmpeq_epi8(bytes, self.query)) }
-                as u32;
+        let has_zero = has_zero_byte(bytes);
+        let has_query = has_byte(bytes, self.query);
+
+        let as_bytes: [u8; 8] = unsafe { mem::transmute(bytes) };
+        let mut zero_move_mask = 0;
+        let mut query_move_mask = 0;
+
+        if has_zero && has_query {
+            for (i, b) in as_bytes.iter().cloned().enumerate() {
+                if b == 0 {
+                    zero_move_mask |= 1 << i;
+                } else if b == self.query {
+                    query_move_mask |= 1 << i;
+                }
+            }
+        } else if has_zero {
+            for (i, b) in as_bytes.iter().cloned().enumerate() {
+                if b == 0 {
+                    zero_move_mask |= 1 << i;
+                }
+            }
+        } else if has_query {
+            for (i, b) in as_bytes.iter().cloned().enumerate() {
+                if b == self.query {
+                    query_move_mask |= 1 << i;
+                }
+            }
+        }
 
         Some((zero_move_mask, query_move_mask))
     }
+}
+
+fn has_zero_byte(v: u64) -> bool {
+    ((v.overflowing_sub(0x0101_0101_0101_0101).0) & !v & 0x8080_8080_8080_8080) != 0
+}
+
+fn has_byte(v: u64, n: u8) -> bool {
+    has_zero_byte(v ^ (u64::MAX / u8::MAX as u64 * n as u64))
 }

@@ -574,7 +574,9 @@ macro_rules! write_test_cases_for_me {
                         barrier.wait();
 
                         for j in 0..MAX_VALUE {
-                            map.insert(j, j);
+                            if let Some(previous) = map.insert(j, j) {
+                                assert_eq!(previous, j);
+                            }
                         }
                     })
                 })
@@ -670,14 +672,14 @@ macro_rules! write_test_cases_for_me {
 
                 $crate::test_util::run_deferred();
 
-                assert!(!key_parent.was_dropped());
-                assert!(value_parent.was_dropped());
+                assert_eq!(key_parent.drop_count(), 0);
+                assert_eq!(value_parent.drop_count(), 1);
             }
 
             $crate::test_util::run_deferred();
 
-            assert!(key_parent.was_dropped());
-            assert!(value_parent.was_dropped());
+            assert_eq!(key_parent.drop_count(), 1);
+            assert_eq!(value_parent.drop_count(), 1);
         }
 
         #[test]
@@ -748,11 +750,11 @@ macro_rules! write_test_cases_for_me {
                 $crate::test_util::run_deferred();
 
                 for this_key_parent in key_parents.iter() {
-                    assert!(!this_key_parent.was_dropped());
+                    assert_eq!(this_key_parent.drop_count(), 0);
                 }
 
                 for this_value_parent in value_parents.iter() {
-                    assert!(this_value_parent.was_dropped());
+                    assert_eq!(this_value_parent.drop_count(), 1);
                 }
 
                 for i in 0..NUM_VALUES {
@@ -763,11 +765,11 @@ macro_rules! write_test_cases_for_me {
             $crate::test_util::run_deferred();
 
             for this_key_parent in key_parents.into_iter() {
-                assert!(this_key_parent.was_dropped());
+                assert_eq!(this_key_parent.drop_count(), 1);
             }
 
             for this_value_parent in value_parents.into_iter() {
-                assert!(this_value_parent.was_dropped());
+                assert_eq!(this_value_parent.drop_count(), 1);
             }
         }
 
@@ -850,11 +852,11 @@ macro_rules! write_test_cases_for_me {
                 $crate::test_util::run_deferred();
 
                 for this_key_parent in key_parents.iter() {
-                    assert!(!this_key_parent.was_dropped());
+                    assert_eq!(this_key_parent.drop_count(), 0);
                 }
 
                 for this_value_parent in value_parents.iter() {
-                    assert!(!this_value_parent.was_dropped());
+                    assert_eq!(this_value_parent.drop_count(), 0);
                 }
 
                 for i in (0..NUM_VALUES).map(|i| i as i32) {
@@ -900,11 +902,11 @@ macro_rules! write_test_cases_for_me {
                 $crate::test_util::run_deferred();
 
                 for this_key_parent in key_parents.iter() {
-                    assert!(!this_key_parent.was_dropped());
+                    assert_eq!(this_key_parent.drop_count(), 0);
                 }
 
                 for this_value_parent in value_parents.iter() {
-                    assert!(this_value_parent.was_dropped());
+                    assert_eq!(this_value_parent.drop_count(), 1);
                 }
 
                 for i in (0..NUM_VALUES).map(|i| i as i32) {
@@ -915,11 +917,11 @@ macro_rules! write_test_cases_for_me {
             $crate::test_util::run_deferred();
 
             for this_key_parent in key_parents.iter() {
-                assert!(this_key_parent.was_dropped());
+                assert_eq!(this_key_parent.drop_count(), 1);
             }
 
             for this_value_parent in value_parents.iter() {
-                assert!(this_value_parent.was_dropped());
+                assert_eq!(this_value_parent.drop_count(), 1);
             }
         }
 

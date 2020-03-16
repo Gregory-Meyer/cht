@@ -30,7 +30,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::{Deref, DerefMut},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -51,7 +51,7 @@ impl<T> NoisyDropper<T> {
 
 impl<T: ?Sized> Drop for NoisyDropper<T> {
     fn drop(&mut self) {
-        assert_eq!(self.parent.dropped.swap(true, Ordering::Relaxed), false);
+        self.parent.drop_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -115,18 +115,18 @@ impl<T: ?Sized> DerefMut for NoisyDropper<T> {
 
 #[derive(Debug)]
 pub(crate) struct DropNotifier {
-    dropped: AtomicBool,
+    drop_count: AtomicUsize,
 }
 
 impl DropNotifier {
     pub(crate) fn new() -> Self {
         Self {
-            dropped: AtomicBool::new(false),
+            drop_count: AtomicUsize::new(0),
         }
     }
 
-    pub(crate) fn was_dropped(&self) -> bool {
-        self.dropped.load(Ordering::Relaxed)
+    pub(crate) fn drop_count(&self) -> usize {
+        self.drop_count.load(Ordering::Relaxed)
     }
 }
 
