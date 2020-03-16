@@ -55,8 +55,10 @@ pub(crate) use facade::Facade;
 pub(crate) use insert_or_modify::InsertOrModifyState;
 pub(crate) use modify::KeyOrOwnedBucket;
 
-use std::hash::BuildHasher;
-use std::hash::Hash;
+use std::{
+    hash::{BuildHasher, Hash},
+    u64,
+};
 
 use arch::{ControlByteGroup, Searcher};
 
