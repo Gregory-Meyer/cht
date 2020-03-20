@@ -68,6 +68,11 @@ impl ControlByteGroup {
 
     pub(crate) fn set_sentinel(&self, index: usize) {
         let addr = unsafe { &*((self.bytes.get() as *const u8).add(index) as *const AtomicU8) };
+
+        if addr.load(Ordering::Relaxed) == super::SENTINEL_CONTROL_BYTE {
+            return;
+        }
+
         addr.store(super::SENTINEL_CONTROL_BYTE, Ordering::Relaxed);
     }
 }
