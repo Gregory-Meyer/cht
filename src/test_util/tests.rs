@@ -89,13 +89,16 @@ macro_rules! write_test_cases_for_me {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_insertion: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
-                            assert_eq!(map.insert(j, j), None);
-                        }
-                    })
+                            for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
+                                assert_eq!(map.insert(j, j), None);
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -127,13 +130,16 @@ macro_rules! write_test_cases_for_me {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_growth: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
-                            assert_eq!(map.insert(j, j), None);
-                        }
-                    })
+                            for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
+                                assert_eq!(map.insert(j, j), None);
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -195,13 +201,16 @@ macro_rules! write_test_cases_for_me {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_removal: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
-                            assert_eq!(map.remove(&j), Some(j));
-                        }
-                    })
+                            for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
+                                assert_eq!(map.remove(&j), Some(j));
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -239,13 +248,16 @@ macro_rules! write_test_cases_for_me {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_insertion_and_removal: insert: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
-                            assert_eq!(map.insert(j, j), None);
-                        }
-                    })
+                            for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
+                                assert_eq!(map.insert(j, j), None);
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -254,15 +266,18 @@ macro_rules! write_test_cases_for_me {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_insertion_and_removal: remove: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in
-                            (0..MAX_VALUE).map(|j| INSERTED_MIDPOINT + j + (i as i32 * MAX_VALUE))
-                        {
-                            assert_eq!(map.remove(&j), Some(j));
-                        }
-                    })
+                            for j in (0..MAX_VALUE)
+                                .map(|j| INSERTED_MIDPOINT + j + (i as i32 * MAX_VALUE))
+                            {
+                                assert_eq!(map.remove(&j), Some(j));
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -309,13 +324,16 @@ macro_rules! write_test_cases_for_me {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_growth_and_removal: insert: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
-                            assert_eq!(map.insert(j, j), None);
-                        }
-                    })
+                            for j in (0..MAX_VALUE).map(|j| j + (i as i32 * MAX_VALUE)) {
+                                assert_eq!(map.insert(j, j), None);
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -324,15 +342,18 @@ macro_rules! write_test_cases_for_me {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_growth_and_removal: remove: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in
-                            (0..MAX_VALUE).map(|j| INSERTED_MIDPOINT + j + (i as i32 * MAX_VALUE))
-                        {
-                            assert_eq!(map.remove(&j), Some(j));
-                        }
-                    })
+                            for j in (0..MAX_VALUE)
+                                .map(|j| INSERTED_MIDPOINT + j + (i as i32 * MAX_VALUE))
+                            {
+                                assert_eq!(map.remove(&j), Some(j));
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -405,13 +426,16 @@ macro_rules! write_test_cases_for_me {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_modification: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in (i as i32 * MAX_VALUE)..((i as i32 + 1) * MAX_VALUE) {
-                            assert_eq!(map.modify(j, |_, x| x * 2), Some(j));
-                        }
-                    })
+                            for j in (i as i32 * MAX_VALUE)..((i as i32 + 1) * MAX_VALUE) {
+                                assert_eq!(map.modify(j, |_, x| x * 2), Some(j));
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -444,17 +468,20 @@ macro_rules! write_test_cases_for_me {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(NUM_THREADS));
 
             let threads: Vec<_> = (0..NUM_THREADS)
-                .map(|_| {
+                .map(|i| {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_overlapped_modification: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for i in 0..MAX_VALUE {
-                            assert!(map.modify(i, |_, x| x + 1).is_some());
-                        }
-                    })
+                            for i in 0..MAX_VALUE {
+                                assert!(map.modify(i, |_, x| x + 1).is_some());
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -494,17 +521,20 @@ macro_rules! write_test_cases_for_me {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(NUM_THREADS));
 
             let threads: Vec<_> = (0..NUM_THREADS)
-                .map(|_| {
+                .map(|i| {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_insert_or_modify: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in 0..MAX_VALUE {
-                            map.insert_or_modify(j, 1, |_, x| x + 1);
-                        }
-                    })
+                            for j in 0..MAX_VALUE {
+                                map.insert_or_modify(j, 1, |_, x| x + 1);
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -530,17 +560,20 @@ macro_rules! write_test_cases_for_me {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(NUM_THREADS));
 
             let threads: Vec<_> = (0..NUM_THREADS)
-                .map(|_| {
+                .map(|i| {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_overlapped_insertion: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in 0..MAX_VALUE {
-                            map.insert(j, j);
-                        }
-                    })
+                            for j in 0..MAX_VALUE {
+                                map.insert(j, j);
+                            }
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -566,19 +599,22 @@ macro_rules! write_test_cases_for_me {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(NUM_THREADS));
 
             let threads: Vec<_> = (0..NUM_THREADS)
-                .map(|_| {
+                .map(|i| {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_overlapped_growth: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in 0..MAX_VALUE {
-                            if let Some(previous) = map.insert(j, j) {
-                                assert_eq!(previous, j);
+                            for j in 0..MAX_VALUE {
+                                if let Some(previous) = map.insert(j, j) {
+                                    assert_eq!(previous, j);
+                                }
                             }
-                        }
-                    })
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -610,21 +646,24 @@ macro_rules! write_test_cases_for_me {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(NUM_THREADS));
 
             let threads: Vec<_> = (0..NUM_THREADS)
-                .map(|_| {
+                .map(|i| {
                     let map = std::sync::Arc::clone(&map);
                     let barrier = std::sync::Arc::clone(&barrier);
 
-                    std::thread::spawn(move || {
-                        barrier.wait();
+                    std::thread::Builder::new()
+                        .name(format!("concurrent_overlapped_removal: {}", i))
+                        .spawn(move || {
+                            barrier.wait();
 
-                        for j in 0..MAX_VALUE {
-                            let prev_value = map.remove(&j);
+                            for j in 0..MAX_VALUE {
+                                let prev_value = map.remove(&j);
 
-                            if let Some(v) = prev_value {
-                                assert_eq!(v, j);
+                                if let Some(v) = prev_value {
+                                    assert_eq!(v, j);
+                                }
                             }
-                        }
-                    })
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -808,37 +847,40 @@ macro_rules! write_test_cases_for_me {
                         let key_parents = std::sync::Arc::clone(&key_parents);
                         let value_parents = std::sync::Arc::clone(&value_parents);
 
-                        std::thread::spawn(move || {
-                            barrier.wait();
+                        std::thread::Builder::new()
+                            .name(format!("drop_many_values_concurrent: insert: {}", i))
+                            .spawn(move || {
+                                barrier.wait();
 
-                            let these_key_parents = &key_parents
-                                [i * NUM_VALUES_PER_THREAD..(i + 1) * NUM_VALUES_PER_THREAD];
-                            let these_value_parents = &value_parents
-                                [i * NUM_VALUES_PER_THREAD..(i + 1) * NUM_VALUES_PER_THREAD];
+                                let these_key_parents = &key_parents
+                                    [i * NUM_VALUES_PER_THREAD..(i + 1) * NUM_VALUES_PER_THREAD];
+                                let these_value_parents = &value_parents
+                                    [i * NUM_VALUES_PER_THREAD..(i + 1) * NUM_VALUES_PER_THREAD];
 
-                            for (j, (this_key_parent, this_value_parent)) in these_key_parents
-                                .iter()
-                                .zip(these_value_parents.iter())
-                                .enumerate()
-                            {
-                                let key_value = i * NUM_VALUES_PER_THREAD + j;
+                                for (j, (this_key_parent, this_value_parent)) in these_key_parents
+                                    .iter()
+                                    .zip(these_value_parents.iter())
+                                    .enumerate()
+                                {
+                                    let key_value = i * NUM_VALUES_PER_THREAD + j;
 
-                                assert_eq!(
-                                    map.insert_and(
-                                        $crate::test_util::NoisyDropper::new(
-                                            std::sync::Arc::clone(&this_key_parent),
-                                            key_value as i32
+                                    assert_eq!(
+                                        map.insert_and(
+                                            $crate::test_util::NoisyDropper::new(
+                                                std::sync::Arc::clone(&this_key_parent),
+                                                key_value as i32
+                                            ),
+                                            $crate::test_util::NoisyDropper::new(
+                                                std::sync::Arc::clone(&this_value_parent),
+                                                key_value as i32
+                                            ),
+                                            |_| ()
                                         ),
-                                        $crate::test_util::NoisyDropper::new(
-                                            std::sync::Arc::clone(&this_value_parent),
-                                            key_value as i32
-                                        ),
-                                        |_| ()
-                                    ),
-                                    None
-                                );
-                            }
-                        })
+                                        None
+                                    );
+                                }
+                            })
+                            .unwrap()
                     })
                     .collect();
 
@@ -874,21 +916,24 @@ macro_rules! write_test_cases_for_me {
                         let map = std::sync::Arc::clone(&map);
                         let barrier = std::sync::Arc::clone(&barrier);
 
-                        std::thread::spawn(move || {
-                            barrier.wait();
+                        std::thread::Builder::new()
+                            .name(format!("drop_many_values_concurrent: remove: {}", i))
+                            .spawn(move || {
+                                barrier.wait();
 
-                            for j in 0..NUM_VALUES_PER_THREAD {
-                                let key_value = (i * NUM_VALUES_PER_THREAD + j) as i32;
+                                for j in 0..NUM_VALUES_PER_THREAD {
+                                    let key_value = (i * NUM_VALUES_PER_THREAD + j) as i32;
 
-                                assert_eq!(
-                                    map.remove_entry_and(&key_value, |k, v| {
-                                        assert_eq!(*k, key_value);
-                                        assert_eq!(*v, key_value);
-                                    }),
-                                    Some(())
-                                );
-                            }
-                        })
+                                    assert_eq!(
+                                        map.remove_entry_and(&key_value, |k, v| {
+                                            assert_eq!(*k, key_value);
+                                            assert_eq!(*v, key_value);
+                                        }),
+                                        Some(())
+                                    );
+                                }
+                            })
+                            .unwrap()
                     })
                     .collect();
 
