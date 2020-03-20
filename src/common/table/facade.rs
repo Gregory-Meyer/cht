@@ -95,10 +95,6 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> Facade<'a, K, V, S> {
         let result;
 
         loop {
-            while self.len.load(Ordering::Relaxed) > table_ref.capacity() {
-                table_ref = table_ref.rehash(guard, self.build_hasher);
-            }
-
             match table_ref.insert(guard, hash, bucket_ptr) {
                 Ok(previous_bucket_ptr) => {
                     match unsafe { Bucket::as_ref(previous_bucket_ptr) } {
@@ -203,10 +199,6 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> Facade<'a, K, V, S> {
         let result;
 
         loop {
-            while self.len.load(Ordering::Relaxed) > table_ref.capacity() {
-                table_ref = table_ref.rehash(guard, self.build_hasher);
-            }
-
             match table_ref.insert_or_modify(guard, hash, state, on_modify) {
                 Ok(previous_bucket_ptr) => {
                     match unsafe { Bucket::as_ref(previous_bucket_ptr) } {

@@ -26,6 +26,8 @@ use super::*;
 
 use crate::common::{Bucket, BucketRef};
 
+use std::sync::atomic::Ordering;
+
 use crossbeam_epoch::{Guard, Owned};
 
 impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
@@ -52,6 +54,10 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
                         return ProbeLoopAction::Continue;
                     }
                     BucketRef::Null => {
+                        if self.num_nonnull_buckets.load(Ordering::Relaxed) >= self.capacity() {
+                            return ProbeLoopAction::Return(Err(bucket_ptr));
+                        }
+
                         assert_eq!(expected, 0);
                     }
                     BucketRef::Sentinel => return ProbeLoopAction::Return(Err(bucket_ptr)),
@@ -66,6 +72,10 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
                 ) {
                     Ok(_) => {
                         these_control_bytes.set(expected, j, control);
+
+                        if this_bucket_ptr.is_null() {
+                            self.num_nonnull_buckets.fetch_add(1, Ordering::Relaxed);
+                        }
 
                         ProbeLoopAction::Return(Ok(this_bucket_ptr))
                     }

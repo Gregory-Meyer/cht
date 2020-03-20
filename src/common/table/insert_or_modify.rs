@@ -26,6 +26,8 @@ use super::*;
 
 use crate::common::{Bucket, BucketRef};
 
+use std::sync::atomic::Ordering;
+
 impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     pub(crate) fn insert_or_modify<F: FnOnce() -> V, G: FnMut(&K, &V) -> V>(
         &self,
@@ -62,6 +64,10 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
                         BucketRef::Null => {
                             assert_eq!(expected, 0);
 
+                            if self.num_nonnull_buckets.load(Ordering::Relaxed) >= self.capacity() {
+                                return ProbeLoopAction::Return(Err(state));
+                            }
+
                             (state.into_insert_bucket(), None)
                         }
                         BucketRef::Sentinel => {
@@ -83,6 +89,10 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
                     ProbeLoopAction::Reload
                 } else {
                     these_control_bytes.set(expected, j, control);
+
+                    if this_bucket_ptr.is_null() {
+                        self.num_nonnull_buckets.fetch_add(1, Ordering::Relaxed);
+                    }
 
                     ProbeLoopAction::Return(Ok(this_bucket_ptr))
                 }

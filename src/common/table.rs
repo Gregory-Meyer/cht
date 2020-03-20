@@ -55,18 +55,16 @@ pub(crate) use facade::Facade;
 pub(crate) use insert_or_modify::InsertOrModifyState;
 pub(crate) use modify::KeyOrOwnedBucket;
 
-use std::{
-    hash::{BuildHasher, Hash},
-    u64,
-};
-
 use arch::{ControlByteGroup, Searcher};
 
 use super::{Bucket, BucketRef};
 
 use std::{
-    env, ptr,
-    sync::atomic::{AtomicU64, Ordering},
+    env,
+    hash::{BuildHasher, Hash},
+    ptr,
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    u64,
 };
 
 use crossbeam_epoch::{Atomic, CompareAndSetError, Guard, Owned, Shared};
@@ -77,6 +75,7 @@ pub(crate) struct Table<K, V> {
     next: Atomic<Table<K, V>>,
     epoch: usize,
     modulo_mask: usize,
+    num_nonnull_buckets: AtomicUsize,
 }
 
 pub(crate) type BucketResult<'g, K, V, E> = Result<Shared<'g, Bucket<K, V>>, E>;
@@ -108,6 +107,7 @@ impl<K, V> Table<K, V> {
         let control_bytes = unsafe { boxed_zeroed_slice(length) };
         let next = Atomic::null();
         let modulo_mask = length - 1;
+        let num_nonnull_buckets = AtomicUsize::new(0);
 
         Self {
             groups,
@@ -115,6 +115,7 @@ impl<K, V> Table<K, V> {
             next,
             epoch,
             modulo_mask,
+            num_nonnull_buckets,
         }
     }
 
@@ -173,6 +174,10 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
                     .is_ok()
                 {
                     these_control_bytes.set(expected, j, control);
+
+                    if this_bucket_ptr.is_null() {
+                        self.num_nonnull_buckets.fetch_add(1, Ordering::Relaxed);
+                    }
 
                     ProbeLoopAction::Return(Some((i, j)))
                 } else {
@@ -277,22 +282,30 @@ impl<'g, K: 'g, V: 'g> Table<K, V> {
 
                     if let Some((group_index, group_offset, mut next_bucket_ptr)) = maybe_state {
                         assert!(!this_bucket_ptr.is_null());
+                        assert!(Bucket::is_borrowed(next_bucket_ptr));
                         let to_put_ptr = Bucket::to_borrowed(this_bucket_ptr);
 
                         let next_bucket =
                             &next_array.groups[group_index].buckets[group_offset as usize];
 
-                        while Bucket::is_borrowed(next_bucket_ptr)
-                            && next_bucket
+                        while Bucket::is_borrowed(next_bucket_ptr) {
+                            if let Err(CompareAndSetError { current, .. }) = next_bucket
                                 .compare_and_set_weak(
                                     next_bucket_ptr,
                                     to_put_ptr,
                                     (Ordering::Release, Ordering::Relaxed),
                                     guard,
                                 )
-                                .is_err()
-                        {
-                            next_bucket_ptr = next_bucket.load_consume(guard);
+                            {
+                                // *next_bucket_ptr is never inspected; relaxed load is fine
+                                if current == to_put_ptr {
+                                    break;
+                                }
+
+                                next_bucket_ptr = current;
+                            } else {
+                                break;
+                            }
                         }
                     } else {
                         match unsafe { Bucket::as_ref(this_bucket_ptr) } {
