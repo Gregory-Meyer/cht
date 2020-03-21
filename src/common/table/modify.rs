@@ -22,11 +22,11 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use super::{BucketLike, BucketResult, MutateBucketResult, Table};
+use super::{BucketResult, MutateResult, MutateVisitResult, MutateVisitor, Table};
 
 use crate::common::Bucket;
 
-use crossbeam_epoch::{Guard, Owned};
+use crossbeam_epoch::{Guard, Owned, Shared};
 
 impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     pub(crate) fn modify<F: FnMut(&K, &V) -> V>(
@@ -34,24 +34,20 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
         guard: &'g Guard,
         hash: u64,
         key_or_owned_bucket: KeyOrOwnedBucket<K, V>,
-        mut modifier: F,
+        modifier: F,
     ) -> BucketResult<'g, K, V, (KeyOrOwnedBucket<K, V>, F)> {
-        match self.mutate_bucket(
+        match self.mutate(
             guard,
             hash,
-            key_or_owned_bucket,
-            |key_or_owned_bucket, _, this_key, this_value| {
-                Some((
-                    key_or_owned_bucket.into_bucket(modifier(this_key, this_value)),
-                    (),
-                ))
+            Visitor {
+                key_or_owned_bucket,
+                modifier,
             },
-            |_, _| None,
-            |_| Ok(None),
         ) {
-            MutateBucketResult::Returned(r) => r.map_err(|k_or_ob| (k_or_ob, modifier)),
-            MutateBucketResult::LoopEnded(k_or_ob)
-            | MutateBucketResult::FoundSentinelTag(k_or_ob) => Err((k_or_ob, modifier)),
+            MutateResult::Returned(r) => r.map_err(Visitor::into_tuple),
+            MutateResult::LoopEnded(visitor) | MutateResult::FoundSentinelTag(visitor) => {
+                Err(visitor.into_tuple())
+            }
         }
     }
 }
@@ -61,27 +57,66 @@ pub(crate) enum KeyOrOwnedBucket<K, V> {
     OwnedBucket(Owned<Bucket<K, V>>),
 }
 
-impl<K, V> KeyOrOwnedBucket<K, V> {
-    fn into_bucket(self, value: V) -> Owned<Bucket<K, V>> {
-        match self {
-            Self::Key(k) => Bucket::new(k, value),
-            Self::OwnedBucket(b) => Bucket::with_value(b, value).0,
-        }
+struct Visitor<K, V, F: FnMut(&K, &V) -> V> {
+    key_or_owned_bucket: KeyOrOwnedBucket<K, V>,
+    modifier: F,
+}
+
+impl<K, V, F: FnMut(&K, &V) -> V> Visitor<K, V, F> {
+    fn into_tuple(self) -> (KeyOrOwnedBucket<K, V>, F) {
+        let Self {
+            key_or_owned_bucket,
+            modifier,
+        } = self;
+
+        (key_or_owned_bucket, modifier)
     }
 }
 
-impl<K: Eq, V> BucketLike<K, V, K> for KeyOrOwnedBucket<K, V> {
-    type Memento = ();
+impl<'g, K, V, F: FnMut(&K, &V) -> V> MutateVisitor<'g, K, V> for Visitor<K, V, F> {
+    type Memento = F;
     type Pointer = Owned<Bucket<K, V>>;
+    type Key = K;
 
-    fn key_like(&self) -> &K {
-        match self {
-            Self::Key(k) => k,
-            Self::OwnedBucket(b) => &b.key,
+    fn key(&self) -> &K {
+        match &self.key_or_owned_bucket {
+            KeyOrOwnedBucket::Key(key) => &key,
+            KeyOrOwnedBucket::OwnedBucket(bucket) => &bucket.key,
         }
     }
 
-    fn from_pointer(bucket: Owned<Bucket<K, V>>, _: ()) -> Self {
-        Self::OwnedBucket(bucket)
+    fn on_filled(
+        self,
+        _: Shared<'g, Bucket<K, V>>,
+        key: &K,
+        value: &V,
+    ) -> MutateVisitResult<'g, K, V, Self> {
+        let Visitor {
+            key_or_owned_bucket,
+            mut modifier,
+        } = self;
+
+        let new_value = modifier(key, value);
+        let bucket = match key_or_owned_bucket {
+            KeyOrOwnedBucket::Key(k) => Bucket::new(k, new_value),
+            KeyOrOwnedBucket::OwnedBucket(b) => Bucket::with_value(b, new_value).0,
+        };
+
+        Ok(Some((bucket, modifier)))
+    }
+
+    fn on_tombstone(self, _: Shared<'_, Bucket<K, V>>, _: &K) -> MutateVisitResult<'g, K, V, Self> {
+        Ok(None)
+    }
+
+    fn on_null(self) -> MutateVisitResult<'g, K, V, Self> {
+        Ok(None)
+    }
+
+    fn from_pointer(bucket: Owned<Bucket<K, V>>, modifier: F) -> Self {
+        Self {
+            key_or_owned_bucket: KeyOrOwnedBucket::OwnedBucket(bucket),
+            modifier,
+        }
     }
 }

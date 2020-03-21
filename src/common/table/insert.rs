@@ -22,26 +22,13 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use super::{BucketLike, BucketResult, MutateBucketResult, Table};
+use super::{BucketResult, MutateResult, MutateVisitResult, MutateVisitor, Table};
 
 use crate::common::Bucket;
 
 use std::sync::atomic::Ordering;
 
-use crossbeam_epoch::{Guard, Owned};
-
-impl<K: Eq, V> BucketLike<K, V, K> for Owned<Bucket<K, V>> {
-    type Memento = ();
-    type Pointer = Self;
-
-    fn key_like(&self) -> &K {
-        &self.key
-    }
-
-    fn from_pointer(pointer: Self::Pointer, _: Self::Memento) -> Self {
-        pointer
-    }
-}
+use crossbeam_epoch::{Guard, Owned, Shared};
 
 impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     pub(crate) fn insert(
@@ -50,22 +37,58 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
         hash: u64,
         bucket_ptr: Owned<Bucket<K, V>>,
     ) -> BucketResult<'g, K, V, Owned<Bucket<K, V>>> {
-        match self.mutate_bucket(
+        match self.mutate(
             guard,
             hash,
-            bucket_ptr,
-            |bucket_ptr, _, _, _| Some((bucket_ptr, ())),
-            |bucket_ptr, _| Some((bucket_ptr, ())),
-            |bucket_ptr| {
-                if self.num_nonnull_buckets.load(Ordering::Relaxed) < self.capacity() {
-                    Ok(Some((bucket_ptr, ())))
-                } else {
-                    Err(bucket_ptr)
-                }
+            Visitor {
+                bucket_ptr,
+                table: self,
             },
         ) {
-            MutateBucketResult::Returned(r) => r,
-            MutateBucketResult::LoopEnded(b) | MutateBucketResult::FoundSentinelTag(b) => Err(b),
+            MutateResult::Returned(r) => r.map_err(|visitor| visitor.bucket_ptr),
+            MutateResult::LoopEnded(vistor) | MutateResult::FoundSentinelTag(vistor) => {
+                Err(vistor.bucket_ptr)
+            }
         }
+    }
+}
+
+struct Visitor<'a, K, V> {
+    bucket_ptr: Owned<Bucket<K, V>>,
+    table: &'a Table<K, V>,
+}
+
+impl<'g, 'a, K, V> MutateVisitor<'g, K, V> for Visitor<'a, K, V> {
+    type Memento = &'a Table<K, V>;
+    type Pointer = Owned<Bucket<K, V>>;
+    type Key = K;
+
+    fn key(&self) -> &K {
+        &self.bucket_ptr.key
+    }
+
+    fn on_filled(
+        self,
+        _: Shared<'_, Bucket<K, V>>,
+        _: &K,
+        _: &V,
+    ) -> MutateVisitResult<'g, K, V, Self> {
+        Ok(Some((self.bucket_ptr, self.table)))
+    }
+
+    fn on_tombstone(self, _: Shared<'_, Bucket<K, V>>, _: &K) -> MutateVisitResult<'g, K, V, Self> {
+        Ok(Some((self.bucket_ptr, self.table)))
+    }
+
+    fn on_null(self) -> MutateVisitResult<'g, K, V, Self> {
+        if self.table.num_nonnull_buckets.load(Ordering::Relaxed) < self.table.capacity() {
+            Ok(Some((self.bucket_ptr, self.table)))
+        } else {
+            Err(self)
+        }
+    }
+
+    fn from_pointer(bucket_ptr: Self::Pointer, table: &'a Table<K, V>) -> Self {
+        Self { bucket_ptr, table }
     }
 }

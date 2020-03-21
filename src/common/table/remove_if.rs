@@ -22,7 +22,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use super::{BucketLike, MutateBucketResult, Table};
+use super::{MutateResult, MutateVisitResult, MutateVisitor, Table};
 
 use crate::common::Bucket;
 
@@ -30,51 +30,66 @@ use std::borrow::Borrow;
 
 use crossbeam_epoch::{Guard, Shared};
 
-impl<'g, K: 'g + Eq, V: 'g, Q: 'g + Eq + ?Sized> BucketLike<K, V, Q> for &'g Q
-where
-    K: Borrow<Q>,
-{
-    type Memento = &'g Q;
-    type Pointer = Shared<'g, Bucket<K, V>>;
-
-    fn key_like(&self) -> &Q {
-        *self
-    }
-
-    fn from_pointer(_: Shared<'g, Bucket<K, V>>, bucket_like: Self) -> Self {
-        bucket_like
-    }
-}
-
 impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     pub(crate) fn remove_if<Q: ?Sized + Eq, F: FnMut(&K, &V) -> bool>(
         &self,
         guard: &'g Guard,
         hash: u64,
-        key: &Q,
-        mut condition: F,
+        key: &'g Q,
+        condition: F,
     ) -> Result<Shared<'g, Bucket<K, V>>, F>
     where
         K: Borrow<Q>,
     {
-        match self.mutate_bucket(
-            guard,
-            hash,
-            key,
-            |key, this_bucket_ptr, this_key, this_value| {
-                if !condition(this_key, this_value) {
-                    None
-                } else {
-                    Some((Bucket::to_tombstone(this_bucket_ptr), key))
-                }
-            },
-            |_, _| None,
-            |_| Ok(None),
-        ) {
-            MutateBucketResult::Returned(r) => r.map_err(|_| condition),
-            MutateBucketResult::LoopEnded(_) | MutateBucketResult::FoundSentinelTag(_) => {
-                Err(condition)
+        match self.mutate(guard, hash, Visitor { key, condition }) {
+            MutateResult::Returned(r) => r.map_err(|visitor| visitor.condition),
+            MutateResult::LoopEnded(visitor) | MutateResult::FoundSentinelTag(visitor) => {
+                Err(visitor.condition)
             }
         }
+    }
+}
+
+struct Visitor<'a, Q: ?Sized, F> {
+    key: &'a Q,
+    condition: F,
+}
+
+impl<'g, 'a: 'g, K: 'a, V: 'a, Q: ?Sized, F: FnMut(&K, &V) -> bool> MutateVisitor<'g, K, V>
+    for Visitor<'a, Q, F>
+{
+    type Memento = Self;
+    type Pointer = Shared<'g, Bucket<K, V>>;
+    type Key = Q;
+
+    fn key(&self) -> &Q {
+        self.key
+    }
+
+    fn on_filled(
+        mut self,
+        bucket_ptr: Shared<'g, Bucket<K, V>>,
+        key: &K,
+        value: &V,
+    ) -> MutateVisitResult<'g, K, V, Self> {
+        if !(self.condition)(key, value) {
+            Ok(None)
+        } else {
+            let bucket = Bucket::to_tombstone(bucket_ptr);
+
+            Ok(Some((bucket, self)))
+        }
+    }
+
+    fn on_tombstone(self, _: Shared<'_, Bucket<K, V>>, _: &K) -> MutateVisitResult<'g, K, V, Self> {
+        Ok(None)
+    }
+
+    fn on_null(self) -> MutateVisitResult<'g, K, V, Self> {
+        Ok(None)
+    }
+
+    fn from_pointer(_: Self::Pointer, visitor: Self) -> Self {
+        visitor
     }
 }
