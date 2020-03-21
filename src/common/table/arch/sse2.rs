@@ -47,7 +47,7 @@ impl ControlByteGroup {
     }
 
     pub(crate) fn set(&self, mut current: u8, offset: usize, value: u8) {
-        let addr = unsafe { &*((self.bytes.get() as *const u8).add(index) as *const AtomicU8) };
+        let addr = unsafe { &*((self.bytes.get() as *const u8).add(offset) as *const AtomicU8) };
 
         loop {
             if current == super::SENTINEL_CONTROL_BYTE || current == value {
@@ -64,8 +64,8 @@ impl ControlByteGroup {
         }
     }
 
-    pub(crate) fn set_sentinel(&self, index: usize) {
-        let addr = unsafe { &*((self.bytes.get() as *const u8).add(index) as *const AtomicU8) };
+    pub(crate) fn set_sentinel(&self, offset: usize) {
+        let addr = unsafe { &*((self.bytes.get() as *const u8).add(offset) as *const AtomicU8) };
 
         if addr.load(Ordering::Relaxed) == super::SENTINEL_CONTROL_BYTE {
             return;
