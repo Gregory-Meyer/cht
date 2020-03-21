@@ -48,6 +48,7 @@ mod get;
 mod insert;
 mod insert_or_modify;
 mod modify;
+mod mutate_bucket;
 mod probe_loop;
 mod rehash;
 mod remove_if;
@@ -56,9 +57,11 @@ pub(crate) use facade::Facade;
 pub(crate) use insert_or_modify::InsertOrModifyState;
 pub(crate) use modify::KeyOrOwnedBucket;
 
+use arch::{ControlByteGroup, Searcher};
+
 use probe_loop::{Action as ProbeLoopAction, Result as ProbeLoopResult, State as ProbeLoopState};
 
-use arch::{ControlByteGroup, Searcher};
+use mutate_bucket::{BucketLike, Result as MutateBucketResult};
 
 use super::Bucket;
 
