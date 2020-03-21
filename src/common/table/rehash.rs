@@ -188,7 +188,7 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
                 loop_state.set_control_byte();
 
                 if this_bucket_ptr.is_null() {
-                    self.num_nonnull_buckets.fetch_add(1, Ordering::Relaxed);
+                    self.num_non_null_buckets.fetch_add(1, Ordering::Relaxed);
                 }
 
                 ProbeLoopAction::Return(Some((group_index, group_offset)))

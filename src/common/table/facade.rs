@@ -22,7 +22,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use super::{InsertOrModifyState, KeyOrOwnedBucket, Table};
+use super::{InsertOrModifyState, KeyOrBucket, Table};
 
 use crate::common::{Bucket, BucketRef};
 
@@ -194,7 +194,10 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> Facade<'a, K, V, S> {
         let guard = &crossbeam_epoch::pin();
         let current_ref = self.get(guard);
         let mut table_ref = current_ref;
-        let mut state = InsertOrModifyState::New(key, on_insert);
+        let mut state = InsertOrModifyState::New {
+            key,
+            insert_function: on_insert,
+        };
 
         let result;
 
@@ -243,7 +246,7 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> Facade<'a, K, V, S> {
         let guard = &crossbeam_epoch::pin();
         let current_ref = self.get(guard);
         let mut table_ref = current_ref;
-        let mut key_or_owned_bucket = KeyOrOwnedBucket::Key(key);
+        let mut key_or_owned_bucket = KeyOrBucket::Key(key);
 
         let result;
 

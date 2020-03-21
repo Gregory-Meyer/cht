@@ -35,27 +35,33 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
         &self,
         guard: &'g Guard,
         hash: u64,
-        bucket_ptr: Owned<Bucket<K, V>>,
+        bucket: Owned<Bucket<K, V>>,
     ) -> BucketResult<'g, K, V, Owned<Bucket<K, V>>> {
         match self.mutate(
             guard,
             hash,
             Visitor {
-                bucket_ptr,
+                bucket,
                 table: self,
             },
         ) {
-            MutateResult::Returned(r) => r.map_err(|visitor| visitor.bucket_ptr),
+            MutateResult::Returned(r) => r.map_err(|visitor| visitor.bucket),
             MutateResult::LoopEnded(vistor) | MutateResult::FoundSentinelTag(vistor) => {
-                Err(vistor.bucket_ptr)
+                Err(vistor.bucket)
             }
         }
     }
 }
 
 struct Visitor<'a, K, V> {
-    bucket_ptr: Owned<Bucket<K, V>>,
+    bucket: Owned<Bucket<K, V>>,
     table: &'a Table<K, V>,
+}
+
+impl<'a, K, V> Visitor<'a, K, V> {
+    fn into_bucket_table<'g>(self) -> MutateVisitResult<'g, K, V, Self> {
+        Ok(Some((self.bucket, self.table)))
+    }
 }
 
 impl<'g, 'a, K, V> MutateVisitor<'g, K, V> for Visitor<'a, K, V> {
@@ -64,7 +70,7 @@ impl<'g, 'a, K, V> MutateVisitor<'g, K, V> for Visitor<'a, K, V> {
     type Key = K;
 
     fn key(&self) -> &K {
-        &self.bucket_ptr.key
+        &self.bucket.key
     }
 
     fn on_filled(
@@ -73,22 +79,22 @@ impl<'g, 'a, K, V> MutateVisitor<'g, K, V> for Visitor<'a, K, V> {
         _: &K,
         _: &V,
     ) -> MutateVisitResult<'g, K, V, Self> {
-        Ok(Some((self.bucket_ptr, self.table)))
+        self.into_bucket_table()
     }
 
     fn on_tombstone(self, _: Shared<'_, Bucket<K, V>>, _: &K) -> MutateVisitResult<'g, K, V, Self> {
-        Ok(Some((self.bucket_ptr, self.table)))
+        self.into_bucket_table()
     }
 
     fn on_null(self) -> MutateVisitResult<'g, K, V, Self> {
-        if self.table.num_nonnull_buckets.load(Ordering::Relaxed) < self.table.capacity() {
-            Ok(Some((self.bucket_ptr, self.table)))
+        if self.table.can_insert() {
+            self.into_bucket_table()
         } else {
             Err(self)
         }
     }
 
-    fn from_pointer(bucket_ptr: Self::Pointer, table: &'a Table<K, V>) -> Self {
-        Self { bucket_ptr, table }
+    fn from_pointer(bucket: Self::Pointer, table: &'a Table<K, V>) -> Self {
+        Self { bucket, table }
     }
 }

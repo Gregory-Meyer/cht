@@ -55,7 +55,7 @@ mod remove_if;
 
 pub(crate) use facade::Facade;
 pub(crate) use insert_or_modify::State as InsertOrModifyState;
-pub(crate) use modify::KeyOrOwnedBucket;
+pub(crate) use modify::KeyOrBucket;
 
 use arch::{ControlByteGroup, Searcher};
 
@@ -79,7 +79,7 @@ pub(crate) struct Table<K, V> {
     next: Atomic<Table<K, V>>,
     epoch: usize,
     modulo_mask: usize,
-    num_nonnull_buckets: AtomicUsize,
+    num_non_null_buckets: AtomicUsize,
 }
 
 pub(crate) type BucketResult<'g, K, V, E> = Result<Shared<'g, Bucket<K, V>>, E>;
@@ -111,7 +111,7 @@ impl<K, V> Table<K, V> {
         let control_bytes = unsafe { boxed_zeroed_slice(length) };
         let next = Atomic::null();
         let modulo_mask = length - 1;
-        let num_nonnull_buckets = AtomicUsize::new(0);
+        let num_non_null_buckets = AtomicUsize::new(0);
 
         Self {
             groups,
@@ -119,7 +119,7 @@ impl<K, V> Table<K, V> {
             next,
             epoch,
             modulo_mask,
-            num_nonnull_buckets,
+            num_non_null_buckets,
         }
     }
 
@@ -128,6 +128,10 @@ impl<K, V> Table<K, V> {
         assert!(self.groups.len().is_power_of_two());
 
         ((self.groups.len() * arch::BUCKETS_PER_GROUP) as f64 * max_load_factor()).floor() as usize
+    }
+
+    fn can_insert(&self) -> bool {
+        self.num_non_null_buckets.load(Ordering::Relaxed) < self.capacity()
     }
 }
 

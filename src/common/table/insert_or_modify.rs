@@ -26,8 +26,6 @@ use super::{BucketResult, MutateResult, MutateVisitResult, MutateVisitor, Table}
 
 use crate::common::Bucket;
 
-use std::sync::atomic::Ordering;
-
 use crossbeam_epoch::{Guard, Owned, Shared};
 
 impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
@@ -56,9 +54,31 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
 }
 
 pub(crate) enum State<K, V, F: FnOnce() -> V> {
-    New(K, F),
-    AttemptedInsertion(Owned<Bucket<K, V>>),
-    AttemptedModification(Owned<Bucket<K, V>>, ValueOrFunction<V, F>),
+    New {
+        key: K,
+        insert_function: F,
+    },
+    AttemptedInsertion {
+        bucket: Owned<Bucket<K, V>>,
+    },
+    AttemptedModification {
+        bucket: Owned<Bucket<K, V>>,
+        insert_value_or_function: ValueOrFunction<V, F>,
+    },
+}
+
+pub(crate) enum ValueOrFunction<V, F: FnOnce() -> V> {
+    Value(V),
+    Function(F),
+}
+
+impl<V, F: FnOnce() -> V> ValueOrFunction<V, F> {
+    fn into_value(self) -> V {
+        match self {
+            ValueOrFunction::Value(v) => v,
+            ValueOrFunction::Function(f) => f(),
+        }
+    }
 }
 
 struct Visitor<'a, K, V, F: FnOnce() -> V, G: FnMut(&K, &V) -> V> {
@@ -86,8 +106,8 @@ impl<'g, 'a, K, V, F: FnOnce() -> V, G: FnMut(&K, &V) -> V> MutateVisitor<'g, K,
 
     fn key(&self) -> &K {
         match &self.state {
-            State::New(key, _) => &key,
-            State::AttemptedInsertion(bucket) | State::AttemptedModification(bucket, _) => {
+            State::New { key, .. } => &key,
+            State::AttemptedInsertion { bucket } | State::AttemptedModification { bucket, .. } => {
                 &bucket.key
             }
         }
@@ -108,15 +128,25 @@ impl<'g, 'a, K, V, F: FnOnce() -> V, G: FnMut(&K, &V) -> V> MutateVisitor<'g, K,
         let new_value = modifier(key, value);
 
         let (bucket, value_or_function) = match state {
-            State::New(k, f) => (Bucket::new(k, new_value), ValueOrFunction::Function(f)),
-            State::AttemptedInsertion(b) => {
-                let (bucket_ptr, insert_value) = Bucket::with_value(b, new_value);
+            State::New {
+                key,
+                insert_function,
+            } => (
+                Bucket::new(key, new_value),
+                ValueOrFunction::Function(insert_function),
+            ),
+            State::AttemptedInsertion { bucket } => {
+                let (bucket, insert_value) = Bucket::with_value(bucket, new_value);
 
-                (bucket_ptr, ValueOrFunction::Value(insert_value))
+                (bucket, ValueOrFunction::Value(insert_value))
             }
-            State::AttemptedModification(bucket_ptr, v_or_f) => {
-                (Bucket::with_value(bucket_ptr, new_value).0, v_or_f)
-            }
+            State::AttemptedModification {
+                bucket,
+                insert_value_or_function,
+            } => (
+                Bucket::with_value(bucket, new_value).0,
+                insert_value_or_function,
+            ),
         };
 
         let memento = (Some(value_or_function), modifier, table);
@@ -129,7 +159,7 @@ impl<'g, 'a, K, V, F: FnOnce() -> V, G: FnMut(&K, &V) -> V> MutateVisitor<'g, K,
     }
 
     fn on_null(self) -> MutateVisitResult<'g, K, V, Self> {
-        if self.table.num_nonnull_buckets.load(Ordering::Relaxed) >= self.table.capacity() {
+        if !self.table.can_insert() {
             return Err(self);
         }
 
@@ -140,9 +170,15 @@ impl<'g, 'a, K, V, F: FnOnce() -> V, G: FnMut(&K, &V) -> V> MutateVisitor<'g, K,
         } = self;
 
         let bucket = match state {
-            State::New(k, f) => Bucket::new(k, f()),
-            State::AttemptedInsertion(b) => b,
-            State::AttemptedModification(b, v_or_f) => Bucket::with_value(b, v_or_f.into_value()).0,
+            State::New {
+                key,
+                insert_function,
+            } => Bucket::new(key, insert_function()),
+            State::AttemptedInsertion { bucket } => bucket,
+            State::AttemptedModification {
+                bucket,
+                insert_value_or_function,
+            } => Bucket::with_value(bucket, insert_value_or_function.into_value()).0,
         };
 
         let memento = (None, modifier, table);
@@ -151,32 +187,21 @@ impl<'g, 'a, K, V, F: FnOnce() -> V, G: FnMut(&K, &V) -> V> MutateVisitor<'g, K,
     }
 
     fn from_pointer(bucket: Owned<Bucket<K, V>>, memento: Self::Memento) -> Self {
-        let (maybe_value_or_function, modifier, table) = memento;
+        let (maybe_insert_value_or_function, modifier, table) = memento;
 
-        let state = if let Some(value_or_function) = maybe_value_or_function {
-            State::AttemptedModification(bucket, value_or_function)
+        let state = if let Some(insert_value_or_function) = maybe_insert_value_or_function {
+            State::AttemptedModification {
+                bucket,
+                insert_value_or_function,
+            }
         } else {
-            State::AttemptedInsertion(bucket)
+            State::AttemptedInsertion { bucket }
         };
 
         Self {
             state,
             modifier,
             table,
-        }
-    }
-}
-
-pub(crate) enum ValueOrFunction<V, F: FnOnce() -> V> {
-    Value(V),
-    Function(F),
-}
-
-impl<V, F: FnOnce() -> V> ValueOrFunction<V, F> {
-    fn into_value(self) -> V {
-        match self {
-            ValueOrFunction::Value(v) => v,
-            ValueOrFunction::Function(f) => f(),
         }
     }
 }

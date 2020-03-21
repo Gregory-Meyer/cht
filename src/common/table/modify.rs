@@ -33,9 +33,9 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
         &self,
         guard: &'g Guard,
         hash: u64,
-        key_or_owned_bucket: KeyOrOwnedBucket<K, V>,
+        key_or_owned_bucket: KeyOrBucket<K, V>,
         modifier: F,
-    ) -> BucketResult<'g, K, V, (KeyOrOwnedBucket<K, V>, F)> {
+    ) -> BucketResult<'g, K, V, (KeyOrBucket<K, V>, F)> {
         match self.mutate(
             guard,
             hash,
@@ -52,18 +52,18 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     }
 }
 
-pub(crate) enum KeyOrOwnedBucket<K, V> {
+pub(crate) enum KeyOrBucket<K, V> {
     Key(K),
-    OwnedBucket(Owned<Bucket<K, V>>),
+    Bucket(Owned<Bucket<K, V>>),
 }
 
 struct Visitor<K, V, F: FnMut(&K, &V) -> V> {
-    key_or_owned_bucket: KeyOrOwnedBucket<K, V>,
+    key_or_owned_bucket: KeyOrBucket<K, V>,
     modifier: F,
 }
 
 impl<K, V, F: FnMut(&K, &V) -> V> Visitor<K, V, F> {
-    fn into_tuple(self) -> (KeyOrOwnedBucket<K, V>, F) {
+    fn into_tuple(self) -> (KeyOrBucket<K, V>, F) {
         let Self {
             key_or_owned_bucket,
             modifier,
@@ -80,8 +80,8 @@ impl<'g, K, V, F: FnMut(&K, &V) -> V> MutateVisitor<'g, K, V> for Visitor<K, V, 
 
     fn key(&self) -> &K {
         match &self.key_or_owned_bucket {
-            KeyOrOwnedBucket::Key(key) => &key,
-            KeyOrOwnedBucket::OwnedBucket(bucket) => &bucket.key,
+            KeyOrBucket::Key(key) => &key,
+            KeyOrBucket::Bucket(bucket) => &bucket.key,
         }
     }
 
@@ -98,8 +98,8 @@ impl<'g, K, V, F: FnMut(&K, &V) -> V> MutateVisitor<'g, K, V> for Visitor<K, V, 
 
         let new_value = modifier(key, value);
         let bucket = match key_or_owned_bucket {
-            KeyOrOwnedBucket::Key(k) => Bucket::new(k, new_value),
-            KeyOrOwnedBucket::OwnedBucket(b) => Bucket::with_value(b, new_value).0,
+            KeyOrBucket::Key(k) => Bucket::new(k, new_value),
+            KeyOrBucket::Bucket(b) => Bucket::with_value(b, new_value).0,
         };
 
         Ok(Some((bucket, modifier)))
@@ -115,7 +115,7 @@ impl<'g, K, V, F: FnMut(&K, &V) -> V> MutateVisitor<'g, K, V> for Visitor<K, V, 
 
     fn from_pointer(bucket: Owned<Bucket<K, V>>, modifier: F) -> Self {
         Self {
-            key_or_owned_bucket: KeyOrOwnedBucket::OwnedBucket(bucket),
+            key_or_owned_bucket: KeyOrBucket::Bucket(bucket),
             modifier,
         }
     }
