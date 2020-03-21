@@ -22,12 +22,6 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-pub(crate) mod get;
-pub(crate) mod insert;
-pub(crate) mod insert_or_modify;
-pub(crate) mod modify;
-pub(crate) mod remove_if;
-
 #[cfg(all(
     target_feature = "avx2",
     any(target_arch = "x86", target_arch = "x86_64")
@@ -50,19 +44,26 @@ mod arch;
 mod arch;
 
 mod facade;
+mod get;
+mod insert;
+mod insert_or_modify;
+mod modify;
+mod probe_loop;
+mod rehash;
+mod remove_if;
 
 pub(crate) use facade::Facade;
 pub(crate) use insert_or_modify::InsertOrModifyState;
 pub(crate) use modify::KeyOrOwnedBucket;
 
+use probe_loop::{Action as ProbeLoopAction, Result as ProbeLoopResult, State as ProbeLoopState};
+
 use arch::{ControlByteGroup, Searcher};
 
-use super::{Bucket, BucketRef};
+use super::Bucket;
 
 use std::{
-    env,
-    hash::{BuildHasher, Hash},
-    ptr,
+    env, ptr,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     u64,
 };
@@ -127,231 +128,7 @@ impl<K, V> Table<K, V> {
     }
 }
 
-impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
-    fn insert_for_grow(
-        &self,
-        guard: &'g Guard,
-        hash: u64,
-        bucket_ptr: Shared<'g, Bucket<K, V>>,
-    ) -> Option<(usize, u32)> {
-        assert!(!bucket_ptr.is_null());
-        assert!(!Bucket::is_sentinel(bucket_ptr));
-        assert!(!Bucket::is_tombstone(bucket_ptr));
-        assert!(Bucket::is_borrowed(bucket_ptr));
-
-        let key = &unsafe { bucket_ptr.deref() }.key;
-
-        let loop_result = self.probe_loop(
-            hash,
-            |i, j, these_control_bytes, control, expected, this_bucket| {
-                let this_bucket_ptr = this_bucket.load_consume(guard);
-
-                if !this_bucket_ptr.is_null() && this_bucket_ptr == bucket_ptr {
-                    return ProbeLoopAction::Return(None);
-                }
-
-                match unsafe { Bucket::as_ref(this_bucket_ptr) } {
-                    BucketRef::Filled(this_key, _) | BucketRef::Tombstone(this_key)
-                        if this_key != key =>
-                    {
-                        return ProbeLoopAction::Continue;
-                    }
-                    BucketRef::Filled(_, _) | BucketRef::Tombstone(_)
-                        if !Bucket::is_borrowed(this_bucket_ptr) =>
-                    {
-                        return ProbeLoopAction::Return(None);
-                    }
-                    _ => (),
-                }
-
-                if this_bucket
-                    .compare_and_set_weak(
-                        this_bucket_ptr,
-                        bucket_ptr,
-                        (Ordering::Release, Ordering::Relaxed),
-                        guard,
-                    )
-                    .is_ok()
-                {
-                    these_control_bytes.set(expected, j, control);
-
-                    if this_bucket_ptr.is_null() {
-                        self.num_nonnull_buckets.fetch_add(1, Ordering::Relaxed);
-                    }
-
-                    ProbeLoopAction::Return(Some((i, j)))
-                } else {
-                    ProbeLoopAction::Reload
-                }
-            },
-        );
-
-        loop_result.returned().flatten()
-    }
-}
-
 impl<'g, K: 'g, V: 'g> Table<K, V> {
-    fn probe_loop<
-        F: FnMut(usize, u32, &ControlByteGroup, u8, u8, &Atomic<Bucket<K, V>>) -> ProbeLoopAction<T>,
-        T,
-    >(
-        &self,
-        hash: u64,
-        mut f: F,
-    ) -> ProbeLoopResult<T> {
-        let (control, index) = split_hash(hash);
-        let offset = index & self.modulo_mask;
-
-        let searcher = Searcher::new(control);
-
-        for i in (0..self.control_bytes.len()).map(|i| i.wrapping_add(offset) & self.modulo_mask) {
-            let this_group = &self.groups[i];
-            let these_control_bytes = &self.control_bytes[i];
-
-            let (mut zero_move_mask, mut query_move_mask) =
-                if let Some((z, q)) = searcher.search(these_control_bytes.load()) {
-                    (z, q)
-                } else {
-                    return ProbeLoopResult::FoundSentinelTag;
-                };
-
-            match (zero_move_mask, query_move_mask) {
-                (0, 0) => continue, // no zeros and no matches; keep probing
-                _ => {
-                    while query_move_mask != 0 || zero_move_mask != 0 {
-                        let query_tz = query_move_mask.trailing_zeros();
-                        let zeros_tz = zero_move_mask.trailing_zeros();
-
-                        assert_ne!(zeros_tz, query_tz);
-
-                        let (j, expected) = if zeros_tz < query_tz {
-                            zero_move_mask &= !(1 << zeros_tz);
-
-                            (zeros_tz, 0)
-                        } else {
-                            query_move_mask &= !(1 << query_tz);
-
-                            (query_tz, control)
-                        };
-
-                        loop {
-                            match f(
-                                i,
-                                j,
-                                these_control_bytes,
-                                control,
-                                expected,
-                                &this_group.buckets[j as usize],
-                            ) {
-                                ProbeLoopAction::Continue => break,
-                                ProbeLoopAction::Reload => (),
-                                ProbeLoopAction::Return(t) => return ProbeLoopResult::Returned(t),
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        ProbeLoopResult::LoopEnded
-    }
-
-    pub(crate) fn rehash<H: BuildHasher>(
-        &self,
-        guard: &'g Guard,
-        build_hasher: &H,
-    ) -> &'g Table<K, V>
-    where
-        K: Hash + Eq,
-    {
-        let next_array = self.next_array(guard);
-        assert!(self.groups.len() <= next_array.groups.len());
-
-        for (these_control_bytes, this_group) in self.control_bytes.iter().zip(self.groups.iter()) {
-            for (j, this_bucket) in this_group.buckets.iter().enumerate() {
-                let mut maybe_state: Option<(usize, u32, Shared<'g, Bucket<K, V>>)> = None;
-
-                loop {
-                    let this_bucket_ptr = this_bucket.load_consume(guard);
-
-                    if Bucket::is_sentinel(this_bucket_ptr) {
-                        these_control_bytes.set_sentinel(j);
-
-                        break;
-                    }
-
-                    if let Some((group_index, group_offset, mut next_bucket_ptr)) = maybe_state {
-                        assert!(!this_bucket_ptr.is_null());
-                        assert!(Bucket::is_borrowed(next_bucket_ptr));
-                        let to_put_ptr = Bucket::to_borrowed(this_bucket_ptr);
-
-                        let next_bucket =
-                            &next_array.groups[group_index].buckets[group_offset as usize];
-
-                        while Bucket::is_borrowed(next_bucket_ptr) {
-                            if let Err(CompareAndSetError { current, .. }) = next_bucket
-                                .compare_and_set_weak(
-                                    next_bucket_ptr,
-                                    to_put_ptr,
-                                    (Ordering::Release, Ordering::Relaxed),
-                                    guard,
-                                )
-                            {
-                                // *next_bucket_ptr is never inspected; relaxed load is fine
-                                if current == to_put_ptr {
-                                    break;
-                                }
-
-                                next_bucket_ptr = current;
-                            } else {
-                                break;
-                            }
-                        }
-                    } else {
-                        match unsafe { Bucket::as_ref(this_bucket_ptr) } {
-                            BucketRef::Filled(this_key, _) => {
-                                let hash = super::hash(build_hasher, this_key);
-                                let to_put_ptr = Bucket::to_borrowed(this_bucket_ptr);
-
-                                if let Some((group_index, group_offset)) =
-                                    next_array.insert_for_grow(guard, hash, to_put_ptr)
-                                {
-                                    maybe_state = Some((group_index, group_offset, to_put_ptr));
-                                }
-                            }
-                            BucketRef::Tombstone(_) => (),
-                            BucketRef::Null => (),
-                            BucketRef::Sentinel => unreachable!(),
-                        }
-                    }
-
-                    if this_bucket
-                        .compare_and_set_weak(
-                            this_bucket_ptr,
-                            Bucket::sentinel(),
-                            (Ordering::Release, Ordering::Relaxed),
-                            guard,
-                        )
-                        .is_ok()
-                    {
-                        if !this_bucket_ptr.is_null()
-                            && Bucket::is_tombstone(this_bucket_ptr)
-                            && maybe_state.is_none()
-                        {
-                            unsafe { guard.defer_destroy(this_bucket_ptr) };
-                        }
-
-                        these_control_bytes.set_sentinel(j);
-
-                        break;
-                    }
-                }
-            }
-        }
-
-        next_array
-    }
-
     fn next_array(&self, guard: &'g Guard) -> &'g Table<K, V> {
         let mut maybe_new_next = None;
 
@@ -379,34 +156,6 @@ impl<'g, K: 'g, V: 'g> Table<K, V> {
             }
         }
     }
-}
-
-enum ProbeLoopAction<T> {
-    Continue,
-    Reload,
-    Return(T),
-}
-
-enum ProbeLoopResult<T> {
-    LoopEnded,
-    FoundSentinelTag,
-    Returned(T),
-}
-
-impl<T> ProbeLoopResult<T> {
-    fn returned(self) -> Option<T> {
-        match self {
-            Self::Returned(t) => Some(t),
-            Self::LoopEnded | Self::FoundSentinelTag => None,
-        }
-    }
-}
-
-fn split_hash(hash: u64) -> (u8, usize) {
-    (
-        (hash & 0b0111_1111) as u8 | 0b1000_0000,
-        (hash >> 7) as usize,
-    )
 }
 
 fn max_load_factor() -> f64 {

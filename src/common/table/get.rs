@@ -22,11 +22,13 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use super::*;
+use super::{BucketResult, ProbeLoopAction, ProbeLoopResult, ProbeLoopState, Table};
 
 use crate::common::{Bucket, BucketRef};
 
 use std::borrow::Borrow;
+
+use crossbeam_epoch::{Guard, Shared};
 
 impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     pub(crate) fn get<Q: ?Sized + Eq>(
@@ -38,25 +40,32 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     where
         K: Borrow<Q>,
     {
-        match self.probe_loop(hash, |_, _, _, _, expected, this_bucket| {
-            if expected == 0 {
-                return ProbeLoopAction::Return(Ok(Shared::null()));
-            }
-
-            let this_bucket_ptr = this_bucket.load_consume(guard);
-
-            match unsafe { Bucket::as_ref(this_bucket_ptr) } {
-                BucketRef::Filled(this_key, _) if this_key.borrow() == key => {
-                    ProbeLoopAction::Return(Ok(this_bucket_ptr))
+        match self.probe_loop(
+            hash,
+            |ProbeLoopState {
+                 current_control_byte,
+                 this_bucket,
+                 ..
+             }| {
+                if current_control_byte == 0 {
+                    return ProbeLoopAction::Return(Ok(Shared::null()));
                 }
-                BucketRef::Tombstone(this_key) if this_key.borrow() == key => {
-                    ProbeLoopAction::Return(Ok(Shared::null()))
+
+                let this_bucket_ptr = this_bucket.load_consume(guard);
+
+                match unsafe { Bucket::as_ref(this_bucket_ptr) } {
+                    BucketRef::Filled(this_key, _) if this_key.borrow() == key => {
+                        ProbeLoopAction::Return(Ok(this_bucket_ptr))
+                    }
+                    BucketRef::Tombstone(this_key) if this_key.borrow() == key => {
+                        ProbeLoopAction::Return(Ok(Shared::null()))
+                    }
+                    BucketRef::Filled(_, _) | BucketRef::Tombstone(_) => ProbeLoopAction::Continue,
+                    BucketRef::Null => ProbeLoopAction::Return(Ok(Shared::null())),
+                    BucketRef::Sentinel => ProbeLoopAction::Return(Err(RelocatedError)),
                 }
-                BucketRef::Filled(_, _) | BucketRef::Tombstone(_) => ProbeLoopAction::Continue,
-                BucketRef::Null => ProbeLoopAction::Return(Ok(Shared::null())),
-                BucketRef::Sentinel => ProbeLoopAction::Return(Err(RelocatedError)),
-            }
-        }) {
+            },
+        ) {
             ProbeLoopResult::LoopEnded => Ok(Shared::null()),
             ProbeLoopResult::FoundSentinelTag => Err(RelocatedError),
             ProbeLoopResult::Returned(r) => r,

@@ -22,13 +22,13 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use super::*;
+use super::{BucketResult, ProbeLoopAction, ProbeLoopResult, ProbeLoopState, Table};
 
 use crate::common::{Bucket, BucketRef};
 
 use std::sync::atomic::Ordering;
 
-use crossbeam_epoch::{Guard, Owned};
+use crossbeam_epoch::{CompareAndSetError, Guard, Owned};
 
 impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     pub(crate) fn insert(
@@ -39,54 +39,57 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     ) -> BucketResult<'g, K, V, Owned<Bucket<K, V>>> {
         let mut maybe_bucket_ptr = Some(bucket_ptr);
 
-        match self.probe_loop(
-            hash,
-            |_, j, these_control_bytes, control, expected, this_bucket| {
-                let bucket_ptr = maybe_bucket_ptr.take().unwrap();
-                let this_bucket_ptr = this_bucket.load_consume(guard);
+        match self.probe_loop(hash, |loop_state| {
+            let ProbeLoopState {
+                current_control_byte,
+                this_bucket,
+                ..
+            } = loop_state;
 
-                match unsafe { Bucket::as_ref(this_bucket_ptr) } {
-                    BucketRef::Filled(this_key, _) | BucketRef::Tombstone(this_key)
-                        if this_key != &bucket_ptr.key =>
-                    {
-                        maybe_bucket_ptr = Some(bucket_ptr);
+            let bucket_ptr = maybe_bucket_ptr.take().unwrap();
+            let this_bucket_ptr = this_bucket.load_consume(guard);
 
-                        return ProbeLoopAction::Continue;
-                    }
-                    BucketRef::Null => {
-                        if self.num_nonnull_buckets.load(Ordering::Relaxed) >= self.capacity() {
-                            return ProbeLoopAction::Return(Err(bucket_ptr));
-                        }
+            match unsafe { Bucket::as_ref(this_bucket_ptr) } {
+                BucketRef::Filled(this_key, _) | BucketRef::Tombstone(this_key)
+                    if this_key != &bucket_ptr.key =>
+                {
+                    maybe_bucket_ptr = Some(bucket_ptr);
 
-                        assert_eq!(expected, 0);
-                    }
-                    BucketRef::Sentinel => return ProbeLoopAction::Return(Err(bucket_ptr)),
-                    _ => (),
+                    return ProbeLoopAction::Continue;
                 }
-
-                match this_bucket.compare_and_set_weak(
-                    this_bucket_ptr,
-                    bucket_ptr,
-                    (Ordering::Release, Ordering::Relaxed),
-                    guard,
-                ) {
-                    Ok(_) => {
-                        these_control_bytes.set(expected, j, control);
-
-                        if this_bucket_ptr.is_null() {
-                            self.num_nonnull_buckets.fetch_add(1, Ordering::Relaxed);
-                        }
-
-                        ProbeLoopAction::Return(Ok(this_bucket_ptr))
+                BucketRef::Null => {
+                    if self.num_nonnull_buckets.load(Ordering::Relaxed) >= self.capacity() {
+                        return ProbeLoopAction::Return(Err(bucket_ptr));
                     }
-                    Err(CompareAndSetError { new, .. }) => {
-                        maybe_bucket_ptr = Some(new);
 
-                        ProbeLoopAction::Reload
-                    }
+                    assert_eq!(current_control_byte, 0);
                 }
-            },
-        ) {
+                BucketRef::Sentinel => return ProbeLoopAction::Return(Err(bucket_ptr)),
+                _ => (),
+            }
+
+            match this_bucket.compare_and_set_weak(
+                this_bucket_ptr,
+                bucket_ptr,
+                (Ordering::Release, Ordering::Relaxed),
+                guard,
+            ) {
+                Ok(_) => {
+                    loop_state.set_control_byte();
+
+                    if this_bucket_ptr.is_null() {
+                        self.num_nonnull_buckets.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    ProbeLoopAction::Return(Ok(this_bucket_ptr))
+                }
+                Err(CompareAndSetError { new, .. }) => {
+                    maybe_bucket_ptr = Some(new);
+
+                    ProbeLoopAction::Reload
+                }
+            }
+        }) {
             ProbeLoopResult::Returned(r) => r,
             ProbeLoopResult::LoopEnded | ProbeLoopResult::FoundSentinelTag => {
                 Err(maybe_bucket_ptr.unwrap())

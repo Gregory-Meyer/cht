@@ -22,11 +22,13 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use super::*;
+use super::{BucketResult, ProbeLoopAction, ProbeLoopResult, ProbeLoopState, Table};
 
 use crate::common::{Bucket, BucketRef};
 
 use std::sync::atomic::Ordering;
+
+use crossbeam_epoch::{CompareAndSetError, Guard, Owned, Shared};
 
 impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     pub(crate) fn insert_or_modify<F: FnOnce() -> V, G: FnMut(&K, &V) -> V>(
@@ -38,66 +40,69 @@ impl<'g, K: 'g + Eq, V: 'g> Table<K, V> {
     ) -> BucketResult<'g, K, V, (InsertOrModifyState<K, V, F>, G)> {
         let mut maybe_state = Some(state);
 
-        match self.probe_loop(
-            hash,
-            |_, j, these_control_bytes, control, expected, this_bucket| {
-                let state = maybe_state.take().unwrap();
-                let this_bucket_ptr = this_bucket.load_consume(guard);
+        match self.probe_loop(hash, |loop_state| {
+            let ProbeLoopState {
+                current_control_byte,
+                this_bucket,
+                ..
+            } = loop_state;
 
-                let (new_bucket, maybe_insert_value) =
-                    match unsafe { Bucket::as_ref(this_bucket_ptr) } {
-                        BucketRef::Filled(this_key, this_value) if this_key == state.key() => {
-                            let new_value = modifier(this_key, this_value);
+            let state = maybe_state.take().unwrap();
+            let this_bucket_ptr = this_bucket.load_consume(guard);
 
-                            let (new_bucket, insert_value) = state.into_modify_bucket(new_value);
+            let (new_bucket, maybe_insert_value) = match unsafe { Bucket::as_ref(this_bucket_ptr) }
+            {
+                BucketRef::Filled(this_key, this_value) if this_key == state.key() => {
+                    let new_value = modifier(this_key, this_value);
 
-                            (new_bucket, Some(insert_value))
-                        }
-                        BucketRef::Tombstone(this_key) if this_key == state.key() => {
-                            (state.into_insert_bucket(), None)
-                        }
-                        BucketRef::Filled(_, _) | BucketRef::Tombstone(_) => {
-                            maybe_state = Some(state);
+                    let (new_bucket, insert_value) = state.into_modify_bucket(new_value);
 
-                            return ProbeLoopAction::Continue;
-                        }
-                        BucketRef::Null => {
-                            assert_eq!(expected, 0);
+                    (new_bucket, Some(insert_value))
+                }
+                BucketRef::Tombstone(this_key) if this_key == state.key() => {
+                    (state.into_insert_bucket(), None)
+                }
+                BucketRef::Filled(_, _) | BucketRef::Tombstone(_) => {
+                    maybe_state = Some(state);
 
-                            if self.num_nonnull_buckets.load(Ordering::Relaxed) >= self.capacity() {
-                                return ProbeLoopAction::Return(Err(state));
-                            }
+                    return ProbeLoopAction::Continue;
+                }
+                BucketRef::Null => {
+                    assert_eq!(current_control_byte, 0);
 
-                            (state.into_insert_bucket(), None)
-                        }
-                        BucketRef::Sentinel => {
-                            return ProbeLoopAction::Return(Err(state));
-                        }
-                    };
-
-                if let Err(CompareAndSetError { new, .. }) = this_bucket.compare_and_set_weak(
-                    this_bucket_ptr,
-                    new_bucket,
-                    (Ordering::Release, Ordering::Relaxed),
-                    guard,
-                ) {
-                    maybe_state = Some(InsertOrModifyState::from_bucket_value(
-                        new,
-                        maybe_insert_value,
-                    ));
-
-                    ProbeLoopAction::Reload
-                } else {
-                    these_control_bytes.set(expected, j, control);
-
-                    if this_bucket_ptr.is_null() {
-                        self.num_nonnull_buckets.fetch_add(1, Ordering::Relaxed);
+                    if self.num_nonnull_buckets.load(Ordering::Relaxed) >= self.capacity() {
+                        return ProbeLoopAction::Return(Err(state));
                     }
 
-                    ProbeLoopAction::Return(Ok(this_bucket_ptr))
+                    (state.into_insert_bucket(), None)
                 }
-            },
-        ) {
+                BucketRef::Sentinel => {
+                    return ProbeLoopAction::Return(Err(state));
+                }
+            };
+
+            if let Err(CompareAndSetError { new, .. }) = this_bucket.compare_and_set_weak(
+                this_bucket_ptr,
+                new_bucket,
+                (Ordering::Release, Ordering::Relaxed),
+                guard,
+            ) {
+                maybe_state = Some(InsertOrModifyState::from_bucket_value(
+                    new,
+                    maybe_insert_value,
+                ));
+
+                ProbeLoopAction::Reload
+            } else {
+                loop_state.set_control_byte();
+
+                if this_bucket_ptr.is_null() {
+                    self.num_nonnull_buckets.fetch_add(1, Ordering::Relaxed);
+                }
+
+                ProbeLoopAction::Return(Ok(this_bucket_ptr))
+            }
+        }) {
             ProbeLoopResult::Returned(Ok(previous_bucket_ptr)) => Ok(previous_bucket_ptr),
             ProbeLoopResult::Returned(Err(state)) => Err((state, modifier)),
             ProbeLoopResult::LoopEnded => Ok(Shared::null()),

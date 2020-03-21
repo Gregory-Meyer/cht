@@ -38,8 +38,8 @@ impl ControlByteGroup {
         self.bytes.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn set(&self, mut current: u8, index: u32, value: u8) {
-        let addr = unsafe { &*(&self.bytes as *const _ as *const AtomicU8).offset(index as isize) };
+    pub(crate) fn set(&self, mut current: u8, offset: usize, value: u8) {
+        let addr = unsafe { &*(&self.bytes as *const _ as *const AtomicU8).add(index) };
 
         loop {
             if current == super::SENTINEL_CONTROL_BYTE || current == value {

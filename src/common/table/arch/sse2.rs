@@ -46,10 +46,8 @@ impl ControlByteGroup {
         unsafe { stdarch::_mm_load_si128(self.bytes.get()) }
     }
 
-    pub(crate) fn set(&self, mut current: u8, index: u32, value: u8) {
-        let addr = unsafe {
-            &*((self.bytes.get() as *const u8).offset(index as isize) as *const AtomicU8)
-        };
+    pub(crate) fn set(&self, mut current: u8, offset: usize, value: u8) {
+        let addr = unsafe { &*((self.bytes.get() as *const u8).add(index) as *const AtomicU8) };
 
         loop {
             if current == super::SENTINEL_CONTROL_BYTE || current == value {
