@@ -46,4 +46,4 @@ let _: Vec<_> = threads.into_iter().map(|t| t.join()).collect();
 
 ## License
 
-cht is licensed under the MIT license.
+cht is licensed under the GNU Affero General Public License v3.0 or later.
