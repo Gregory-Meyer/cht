@@ -16,18 +16,3 @@ num-cpus = ["num_cpus"]
 ahash = "^0.3.2"
 crossbeam-epoch = "^0.8.2"
 num_cpus = { version = "^1.12.0", optional = true }
-
-[dev-dependencies]
-criterion = "^0.3.1"
-hashbrown = "^0.7.0"
-lock_api = "^0.3.3"
-num_cpus = "^1.12.0"
-parking_lot = "^0.10.0"
-
-[[bench]]
-name = "cht"
-harness = false
-
-[[bench]]
-name = "mutex"
-harness = false
