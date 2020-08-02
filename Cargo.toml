@@ -13,6 +13,5 @@ default = ["num-cpus"]
 num-cpus = ["num_cpus"]
 
 [dependencies]
-ahash = "^0.3.2"
 crossbeam-epoch = "^0.8.2"
 num_cpus = { version = "^1.12.0", optional = true }

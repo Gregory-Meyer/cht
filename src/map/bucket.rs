@@ -696,7 +696,7 @@ pub(crate) const BORROWED_TAG: usize = 0b100; // set on new table buckets when c
 mod tests {
     use super::*;
 
-    use ahash::RandomState;
+    use std::collections::hash_map::RandomState;
 
     #[test]
     fn get_insert_remove() {
