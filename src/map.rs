@@ -24,11 +24,11 @@ use bucket_array_ref::BucketArrayRef;
 
 use std::{
     borrow::Borrow,
+    collections::hash_map::RandomState,
     hash::{BuildHasher, Hash},
     sync::atomic::{self, AtomicUsize, Ordering},
 };
 
-use ahash::RandomState;
 use crossbeam_epoch::{self, Atomic};
 
 /// Default hasher for `HashMap`.
