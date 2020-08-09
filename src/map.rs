@@ -241,15 +241,15 @@ impl<'a, K, V> Iterator for RawIter<'a, K, V> {
         match &mut self.inner {
             RawIterInner::Empty => None,
             RawIterInner::Referenced {
-                guard,
                 bucket_array_ptr,
                 index,
                 ..
             } => {
+                let guard = crossbeam_epoch::pin();
                 let bucket_array_ref = unsafe { bucket_array_ptr.as_ref() }.unwrap();
 
                 while *index < bucket_array_ref.buckets.len() {
-                    match unsafe { bucket_array_ref.get_index_unchecked(guard, *index) } {
+                    match unsafe { bucket_array_ref.get_index_unchecked(&guard, *index) } {
                         Ok(bucket_ptr) if bucket_ptr.is_null() => {
                             *index += 1;
 
@@ -260,7 +260,7 @@ impl<'a, K, V> Iterator for RawIter<'a, K, V> {
                             *index += 1;
 
                             return Some(Ok(EntryRef {
-                                guard: crossbeam_epoch::pin(),
+                                guard,
                                 bucket_ptr,
                                 phantom: PhantomData,
                             }));
