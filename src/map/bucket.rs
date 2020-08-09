@@ -53,6 +53,24 @@ impl<K, V> BucketArray<K, V> {
 
         self.buckets.len() / 2
     }
+
+    pub(crate) unsafe fn get_index_unchecked<'g>(
+        &self,
+        guard: &'g Guard,
+        index: usize,
+    ) -> Result<Shared<'g, Bucket<K, V>>, RelocatedError> {
+        let bucket_ptr = self.buckets[index].load_consume(guard);
+
+        if bucket_ptr.tag() & SENTINEL_TAG != 0 {
+            return Err(RelocatedError);
+        }
+
+        if bucket_ptr.tag() & TOMBSTONE_TAG != 0 || bucket_ptr.is_null() {
+            return Ok(Shared::null());
+        }
+
+        Ok(bucket_ptr)
+    }
 }
 
 impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {

@@ -25,11 +25,20 @@ use bucket_array_ref::BucketArrayRef;
 use std::{
     borrow::Borrow,
     collections::hash_map::RandomState,
+    error::Error,
+    fmt::{self, Display, Formatter},
     hash::{BuildHasher, Hash},
+    marker::PhantomData,
     sync::atomic::{self, AtomicUsize, Ordering},
 };
 
-use crossbeam_epoch::{self, Atomic};
+use crossbeam_epoch::{self, Atomic, Guard};
+
+#[cfg(feature = "serde")]
+use serde::{
+    de::{Deserialize, Deserializer, MapAccess, Visitor},
+    ser::{Serialize, SerializeMap, Serializer},
+};
 
 /// Default hasher for `HashMap`.
 pub type DefaultHashBuilder = RandomState;
@@ -169,7 +178,144 @@ impl<K, V, S> HashMap<K, V, S> {
             .map(BucketArray::capacity)
             .unwrap_or(0)
     }
+
+    pub fn raw_iter(&self) -> RawIter<K, V> {
+        let guard = crossbeam_epoch::pin();
+
+        let bucket_array_ptr = self.bucket_array.load_consume(&guard).as_raw();
+
+        if bucket_array_ptr.is_null() {
+            RawIter {
+                inner: RawIterInner::Empty,
+            }
+        } else {
+            RawIter {
+                inner: RawIterInner::Referenced {
+                    guard,
+                    bucket_array_ptr,
+                    index: 0,
+                    phantom: PhantomData,
+                },
+            }
+        }
+    }
 }
+
+pub struct EntryRef<'a, K, V> {
+    #[allow(dead_code)]
+    guard: Guard,
+    bucket_ptr: *const bucket::Bucket<K, V>,
+    phantom: PhantomData<&'a HashMap<K, V>>,
+}
+
+impl<'a, K, V> EntryRef<'a, K, V> {
+    pub fn key(&self) -> &K {
+        let bucket_ref = unsafe { self.bucket_ptr.as_ref() }.unwrap();
+
+        &bucket_ref.key
+    }
+
+    pub fn value(&self) -> &V {
+        let bucket_ref = unsafe { self.bucket_ptr.as_ref() }.unwrap();
+
+        unsafe { &*bucket_ref.maybe_value.as_ptr() }
+    }
+
+    pub fn entry(&self) -> (&K, &V) {
+        let bucket_ref = unsafe { self.bucket_ptr.as_ref() }.unwrap();
+
+        (&bucket_ref.key, unsafe {
+            &*bucket_ref.maybe_value.as_ptr()
+        })
+    }
+}
+
+pub struct RawIter<'a, K, V> {
+    inner: RawIterInner<'a, K, V>,
+}
+
+impl<'a, K, V> Iterator for RawIter<'a, K, V> {
+    type Item = Result<EntryRef<'a, K, V>, RestartIterationError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            RawIterInner::Empty => None,
+            RawIterInner::Referenced {
+                guard,
+                bucket_array_ptr,
+                index,
+                ..
+            } => {
+                let bucket_array_ref = unsafe { bucket_array_ptr.as_ref() }.unwrap();
+
+                while *index < bucket_array_ref.buckets.len() {
+                    match unsafe { bucket_array_ref.get_index_unchecked(guard, *index) } {
+                        Ok(bucket_ptr) if bucket_ptr.is_null() => {
+                            *index += 1;
+
+                            continue;
+                        }
+                        Ok(bucket_ptr) => {
+                            let bucket_ptr = bucket_ptr.as_raw();
+                            *index += 1;
+
+                            return Some(Ok(EntryRef {
+                                guard: crossbeam_epoch::pin(),
+                                bucket_ptr,
+                                phantom: PhantomData,
+                            }));
+                        }
+                        Err(_) => {
+                            self.inner = RawIterInner::Empty;
+
+                            return Some(Err(RestartIterationError));
+                        }
+                    }
+                }
+
+                self.inner = RawIterInner::Empty;
+
+                None
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.inner {
+            RawIterInner::Empty => (0, Some(0)),
+            RawIterInner::Referenced {
+                bucket_array_ptr,
+                index,
+                ..
+            } => (
+                0,
+                Some(unsafe { bucket_array_ptr.as_ref() }.unwrap().buckets.len() - *index),
+            ),
+        }
+    }
+}
+
+enum RawIterInner<'a, K, V> {
+    Empty,
+    Referenced {
+        #[allow(dead_code)]
+        guard: Guard,
+        bucket_array_ptr: *const bucket::BucketArray<K, V>,
+        index: usize,
+        phantom: PhantomData<&'a HashMap<K, V>>,
+    },
+}
+
+#[derive(Debug)]
+pub struct RestartIterationError;
+
+impl Display for RestartIterationError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str("table resized while iterating")
+    }
+}
+
+impl Error for RestartIterationError {}
 
 impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     /// Returns a clone of the value corresponding to the key.
@@ -818,6 +964,82 @@ impl<K, V, S> Drop for HashMap<K, V, S> {
     }
 }
 
+#[cfg(feature = "serde")]
+impl<K: Serialize, V: Serialize, H> Serialize for HashMap<K, V, H> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut contents = Vec::with_capacity(self.len());
+
+        {
+            let mut raw_iter = self.raw_iter();
+
+            loop {
+                match raw_iter.next() {
+                    Some(Ok(entry)) => {
+                        contents.push(entry);
+                    }
+                    Some(Err(_)) => {
+                        contents.clear();
+                        raw_iter = self.raw_iter();
+                    }
+                    None => {
+                        break; // done!
+                    }
+                }
+            }
+        }
+
+        let mut map = serializer.serialize_map(Some(contents.len()))?;
+
+        for entry in contents.into_iter() {
+            map.serialize_entry(entry.key(), entry.value())?;
+        }
+
+        map.end()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, K: Deserialize<'de> + Eq + Hash, V: Deserialize<'de>, H: BuildHasher + Default>
+    Deserialize<'de> for HashMap<K, V, H>
+{
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MapVisitor<K, V, H> {
+            phantom: PhantomData<HashMap<K, V, H>>,
+        }
+
+        impl<
+                'de,
+                K: Deserialize<'de> + Eq + Hash,
+                V: Deserialize<'de>,
+                H: BuildHasher + Default,
+            > Visitor<'de> for MapVisitor<K, V, H>
+        {
+            type Value = HashMap<K, V, H>;
+
+            fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
+                formatter.write_str("a map")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut access: M) -> Result<Self::Value, M::Error> {
+                let map = HashMap::with_capacity_and_hasher(
+                    access.size_hint().unwrap_or(0),
+                    H::default(),
+                );
+
+                while let Some((key, value)) = access.next_entry()? {
+                    map.insert_entry_and(key, value, |_, _| ());
+                }
+
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(MapVisitor {
+            phantom: PhantomData,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::write_test_cases_for_me;
@@ -825,4 +1047,91 @@ mod tests {
     use super::*;
 
     write_test_cases_for_me!(HashMap);
+
+    #[test]
+    fn raw_iter() {
+        let map = HashMap::new();
+
+        let mut raw_iter = map.raw_iter();
+        assert!(raw_iter.next().is_none());
+        assert_eq!(raw_iter.size_hint(), (0, Some(0)));
+
+        map.insert(0, 0);
+        map.insert(5, 5);
+        map.insert(10, 10);
+        map.insert(15, 15);
+
+        let mut raw_iter = map.raw_iter();
+        let mut elems = Vec::with_capacity(map.len());
+
+        for i in 0..4 {
+            assert!(raw_iter.size_hint().1.unwrap() >= 4 - i);
+            elems.push(raw_iter.next().unwrap().unwrap());
+        }
+
+        assert!(raw_iter.next().is_none());
+        assert_eq!(raw_iter.size_hint(), (0, Some(0)));
+
+        elems.sort_by(|lhs, rhs| lhs.key().cmp(rhs.key()));
+        assert_eq!(
+            elems
+                .into_iter()
+                .map(|entry| (*entry.key(), *entry.value()))
+                .collect::<Vec<_>>(),
+            [(0, 0), (5, 5), (10, 10), (15, 15)]
+        );
+
+        // resize while holding an iterator
+        raw_iter = map.raw_iter();
+
+        for i in 4..512 {
+            map.insert(i * 5, i * 5);
+        }
+
+        let should_not_be_an_elem = raw_iter.next();
+        assert!(should_not_be_an_elem.is_some());
+        assert!(should_not_be_an_elem.unwrap().is_err());
+
+        let should_be_none = raw_iter.next();
+        assert!(should_be_none.is_none());
+    }
+
+    #[test]
+    fn serialize() {
+        let map = HashMap::<i32, i32>::new();
+
+        map.insert(0, 0);
+        map.insert(5, 5);
+        map.insert(10, 10);
+        map.insert(15, 15);
+
+        let json = serde_json::to_string(&map).unwrap();
+        let deserialized_map: std::collections::HashMap<i32, i32> =
+            serde_json::from_str(&json).unwrap();
+
+        assert_eq!(map.len(), deserialized_map.len());
+
+        for (key, value) in deserialized_map.iter() {
+            assert_eq!(map.get(key).unwrap(), *value);
+        }
+    }
+
+    #[test]
+    fn deserialize() {
+        let mut to_serialize = std::collections::HashMap::<i32, i32>::new();
+
+        to_serialize.insert(0, 0);
+        to_serialize.insert(5, 5);
+        to_serialize.insert(10, 10);
+        to_serialize.insert(15, 15);
+
+        let json = serde_json::to_string(&to_serialize).unwrap();
+        let map: HashMap<i32, i32> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(to_serialize.len(), map.len());
+
+        for (key, value) in to_serialize.iter() {
+            assert_eq!(map.get(key).unwrap(), *value);
+        }
+    }
 }

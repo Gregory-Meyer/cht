@@ -91,7 +91,7 @@ pub struct HashMap<K, V, S = DefaultHashBuilder> {
     segment_shift: u32,
 }
 
-#[cfg(feature = "num-cpus")]
+#[cfg(feature = "num_cpus")]
 impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// Creates an empty `HashMap`.
     ///
@@ -127,7 +127,7 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     }
 }
 
-#[cfg(feature = "num-cpus")]
+#[cfg(feature = "num_cpus")]
 impl<K, V, S: BuildHasher> HashMap<K, V, S> {
     /// Creates an empty `HashMap` which will use the given hash builder to hash
     /// keys.
@@ -963,7 +963,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> HashMap<K, V, S> {
     }
 }
 
-#[cfg(feature = "num-cpus")]
+#[cfg(feature = "num_cpus")]
 impl<K, V, S: Default> Default for HashMap<K, V, S> {
     fn default() -> Self {
         HashMap::with_num_segments_capacity_and_hasher(default_num_segments(), 0, S::default())
@@ -1039,7 +1039,7 @@ struct Segment<K, V> {
     len: AtomicUsize,
 }
 
-#[cfg(feature = "num-cpus")]
+#[cfg(feature = "num_cpus")]
 fn default_num_segments() -> usize {
     num_cpus::get() * 2
 }
