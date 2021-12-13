@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Gregory Meyer
+// Copyright (C) 2021 Gregory Meyer
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -87,11 +87,9 @@
 //! [a tech talk]: https://youtu.be/HJ-719EGIts
 
 pub mod map;
-pub mod segment;
 
 #[cfg(test)]
 #[macro_use]
 pub(crate) mod test_util;
 
 pub use map::HashMap;
-pub use segment::HashMap as SegmentedHashMap;
