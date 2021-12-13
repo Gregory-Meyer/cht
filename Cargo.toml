@@ -2,11 +2,11 @@
 name = "cht"
 version = "0.4.1"
 authors = ["Gregory Meyer <me@gregjm.dev>"]
-edition = "2018"
+edition = "2021"
 description = "Lockfree resizeable concurrent hash table."
 repository = "https://github.com/Gregory-Meyer/cht"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-crossbeam-epoch = "^0.8.2"
+crossbeam-epoch = "0.9"
