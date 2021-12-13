@@ -15,7 +15,7 @@ performance.
 In your `Cargo.toml`:
 
 ```toml
-cht = "^0.4.1"
+cht = "0.5"
 ```
 
 Then in your code:
