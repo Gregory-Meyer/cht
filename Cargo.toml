@@ -8,10 +8,5 @@ repository = "https://github.com/Gregory-Meyer/cht"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 
-[features]
-default = ["num-cpus"]
-num-cpus = ["num_cpus"]
-
 [dependencies]
 crossbeam-epoch = "^0.8.2"
-num_cpus = { version = "^1.13.0", optional = true }
