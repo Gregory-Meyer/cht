@@ -1,26 +1,17 @@
-// MIT License
+// Copyright (C) 2021 Gregory Meyer
 //
-// Copyright (c) 2020 Gregory Meyer
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-// Permission is hereby granted, free of charge, to any person
-// obtaining a copy of this software and associated documentation files
-// (the "Software"), to deal in the Software without restriction,
-// including without limitation the rights to use, copy, modify, merge,
-// publish, distribute, sublicense, and/or sell copies of the Software,
-// and to permit persons to whom the Software is furnished to do so,
-// subject to the following conditions:
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// The above copyright notice and this permission notice shall be
-// included in all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
-// BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
-// ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::{
     borrow::Borrow,
@@ -30,7 +21,7 @@ use std::{
     sync::atomic::{self, Ordering},
 };
 
-use crossbeam_epoch::{Atomic, CompareAndSetError, Guard, Owned, Shared};
+use crossbeam_epoch::{Atomic, CompareExchangeError, Guard, Owned, Shared};
 
 pub(crate) struct BucketArray<K, V> {
     pub(crate) buckets: Box<[Atomic<Bucket<K, V>>]>,
@@ -124,14 +115,15 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
                 }
             }
 
-            match this_bucket.compare_and_set_weak(
+            match this_bucket.compare_exchange_weak(
                 this_bucket_ptr,
                 bucket_ptr,
-                (Ordering::Release, Ordering::Relaxed),
+                Ordering::Release,
+                Ordering::Relaxed,
                 guard,
             ) {
                 Ok(_) => ProbeLoopAction::Return(this_bucket_ptr),
-                Err(CompareAndSetError { new, .. }) => {
+                Err(CompareExchangeError { new, .. }) => {
                     maybe_bucket_ptr = Some(new);
 
                     ProbeLoopAction::Reload
@@ -178,10 +170,11 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
 
             let new_bucket_ptr = this_bucket_ptr.with_tag(TOMBSTONE_TAG);
 
-            match this_bucket.compare_and_set_weak(
+            match this_bucket.compare_exchange_weak(
                 this_bucket_ptr,
                 new_bucket_ptr,
-                (Ordering::Release, Ordering::Relaxed),
+                Ordering::Release,
+                Ordering::Relaxed,
                 guard,
             ) {
                 Ok(_) => ProbeLoopAction::Return(new_bucket_ptr),
@@ -231,10 +224,11 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
                 let new_value = modifier(this_key, this_value);
                 let new_bucket = key_or_owned_bucket.into_bucket(new_value);
 
-                if let Err(CompareAndSetError { new, .. }) = this_bucket.compare_and_set_weak(
+                if let Err(CompareExchangeError { new, .. }) = this_bucket.compare_exchange_weak(
                     this_bucket_ptr,
                     new_bucket,
-                    (Ordering::Release, Ordering::Relaxed),
+                    Ordering::Release,
+                    Ordering::Relaxed,
                     guard,
                 ) {
                     maybe_key_or_owned_bucket = Some(KeyOrOwnedBucket::OwnedBucket(new));
@@ -289,10 +283,11 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
                     (state.into_insert_bucket(), None)
                 };
 
-            if let Err(CompareAndSetError { new, .. }) = this_bucket.compare_and_set_weak(
+            if let Err(CompareExchangeError { new, .. }) = this_bucket.compare_exchange_weak(
                 this_bucket_ptr,
                 new_bucket,
-                (Ordering::Release, Ordering::Relaxed),
+                Ordering::Release,
+                Ordering::Relaxed,
                 guard,
             ) {
                 maybe_state = Some(InsertOrModifyState::from_bucket_value(
@@ -337,10 +332,11 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
             if this_bucket_ptr.is_null() && bucket_ptr.tag() & TOMBSTONE_TAG != 0 {
                 ProbeLoopAction::Return(None)
             } else if this_bucket
-                .compare_and_set_weak(
+                .compare_exchange_weak(
                     this_bucket_ptr,
                     bucket_ptr,
-                    (Ordering::Release, Ordering::Relaxed),
+                    Ordering::Release,
+                    Ordering::Relaxed,
                     guard,
                 )
                 .is_ok()
@@ -420,10 +416,11 @@ impl<'g, K: 'g, V: 'g> BucketArray<K, V> {
 
                     while next_bucket_ptr.tag() & BORROWED_TAG != 0
                         && next_bucket
-                            .compare_and_set_weak(
+                            .compare_exchange_weak(
                                 next_bucket_ptr,
                                 to_put_ptr,
-                                (Ordering::Release, Ordering::Relaxed),
+                                Ordering::Release,
+                                Ordering::Relaxed,
                                 guard,
                             )
                             .is_err()
@@ -440,10 +437,11 @@ impl<'g, K: 'g, V: 'g> BucketArray<K, V> {
                 }
 
                 if this_bucket
-                    .compare_and_set_weak(
+                    .compare_exchange_weak(
                         this_bucket_ptr,
                         Shared::null().with_tag(SENTINEL_TAG),
-                        (Ordering::Release, Ordering::Relaxed),
+                        Ordering::Release,
+                        Ordering::Relaxed,
                         guard,
                     )
                     .is_ok()
@@ -480,14 +478,15 @@ impl<'g, K: 'g, V: 'g> BucketArray<K, V> {
                 ))
             });
 
-            match self.next.compare_and_set_weak(
+            match self.next.compare_exchange_weak(
                 Shared::null(),
                 new_next,
-                (Ordering::Release, Ordering::Relaxed),
+                Ordering::Release,
+                Ordering::Relaxed,
                 guard,
             ) {
                 Ok(p) => return unsafe { p.deref() },
-                Err(CompareAndSetError { new, .. }) => {
+                Err(CompareExchangeError { new, .. }) => {
                     maybe_new_next = Some(new);
                 }
             }
@@ -705,7 +704,7 @@ pub(crate) const BORROWED_TAG: usize = 0b100; // set on new table buckets when c
 mod tests {
     use super::*;
 
-    use ahash::RandomState;
+    use std::collections::hash_map::RandomState;
 
     #[test]
     fn get_insert_remove() {
