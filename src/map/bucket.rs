@@ -24,7 +24,7 @@ use std::{
 use crossbeam_epoch::{Atomic, CompareExchangeError, Guard, Owned, Shared};
 
 pub(crate) struct BucketArray<K, V> {
-    pub(crate) buckets: Box<[Atomic<Bucket<K, V>>]>,
+    pub(crate) buckets: Box<[AtomicBucket<K, V>]>,
     pub(crate) next: Atomic<BucketArray<K, V>>,
     pub(crate) epoch: usize,
 }
@@ -61,7 +61,7 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         guard: &'g Guard,
         hash: u64,
         key: &Q,
-    ) -> Result<Shared<'g, Bucket<K, V>>, RelocatedError>
+    ) -> Result<SharedBucket<'g, K, V>, RelocatedError>
     where
         K: Borrow<Q>,
     {
@@ -99,8 +99,8 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         &self,
         guard: &'g Guard,
         hash: u64,
-        bucket_ptr: Owned<Bucket<K, V>>,
-    ) -> Result<Shared<'g, Bucket<K, V>>, Owned<Bucket<K, V>>> {
+        bucket_ptr: OwnedBucket<K, V>,
+    ) -> Result<SharedBucket<'g, K, V>, OwnedBucket<K, V>> {
         let mut maybe_bucket_ptr = Some(bucket_ptr);
 
         let loop_result = self.probe_loop(guard, hash, |_, this_bucket, this_bucket_ptr| {
@@ -142,7 +142,7 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         hash: u64,
         key: &Q,
         mut condition: F,
-    ) -> Result<Shared<'g, Bucket<K, V>>, F>
+    ) -> Result<SharedBucket<'g, K, V>, F>
     where
         K: Borrow<Q>,
     {
@@ -195,7 +195,7 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         hash: u64,
         key_or_owned_bucket: KeyOrOwnedBucket<K, V>,
         mut modifier: F,
-    ) -> Result<Shared<'g, Bucket<K, V>>, (KeyOrOwnedBucket<K, V>, F)> {
+    ) -> Result<SharedBucket<'g, K, V>, (KeyOrOwnedBucket<K, V>, F)> {
         let mut maybe_key_or_owned_bucket = Some(key_or_owned_bucket);
 
         let loop_result = self.probe_loop(guard, hash, |_, this_bucket, this_bucket_ptr| {
@@ -253,7 +253,7 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         hash: u64,
         state: InsertOrModifyState<K, V, F>,
         mut modifier: G,
-    ) -> Result<Shared<'g, Bucket<K, V>>, (InsertOrModifyState<K, V, F>, G)> {
+    ) -> Result<SharedBucket<'g, K, V>, (InsertOrModifyState<K, V, F>, G)> {
         let mut maybe_state = Some(state);
 
         let loop_result = self.probe_loop(guard, hash, |_, this_bucket, this_bucket_ptr| {
@@ -310,7 +310,7 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
         &self,
         guard: &'g Guard,
         hash: u64,
-        bucket_ptr: Shared<'g, Bucket<K, V>>,
+        bucket_ptr: SharedBucket<'g, K, V>,
     ) -> Option<usize> {
         assert!(!bucket_ptr.is_null());
         assert_eq!(bucket_ptr.tag() & SENTINEL_TAG, 0);
@@ -353,7 +353,7 @@ impl<'g, K: 'g + Eq, V: 'g> BucketArray<K, V> {
 
 impl<'g, K: 'g, V: 'g> BucketArray<K, V> {
     fn probe_loop<
-        F: FnMut(usize, &Atomic<Bucket<K, V>>, Shared<'g, Bucket<K, V>>) -> ProbeLoopAction<T>,
+        F: FnMut(usize, &AtomicBucket<K, V>, SharedBucket<'g, K, V>) -> ProbeLoopAction<T>,
         T,
     >(
         &self,
@@ -398,7 +398,7 @@ impl<'g, K: 'g, V: 'g> BucketArray<K, V> {
         assert!(self.buckets.len() <= next_array.buckets.len());
 
         for this_bucket in self.buckets.iter() {
-            let mut maybe_state: Option<(usize, Shared<'g, Bucket<K, V>>)> = None;
+            let mut maybe_state: Option<(usize, SharedBucket<'g, K, V>)> = None;
 
             loop {
                 let this_bucket_ptr = this_bucket.load_consume(guard);
@@ -510,12 +510,16 @@ impl<K, V> Bucket<K, V> {
     }
 }
 
+pub(crate) type AtomicBucket<K, V> = Atomic<Bucket<K, V>>;
+pub(crate) type SharedBucket<'g, K, V> = Shared<'g, Bucket<K, V>>;
+pub(crate) type OwnedBucket<K, V> = Owned<Bucket<K, V>>;
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct RelocatedError;
 
 pub(crate) enum KeyOrOwnedBucket<K, V> {
     Key(K),
-    OwnedBucket(Owned<Bucket<K, V>>),
+    OwnedBucket(OwnedBucket<K, V>),
 }
 
 impl<K, V> KeyOrOwnedBucket<K, V> {
@@ -526,7 +530,7 @@ impl<K, V> KeyOrOwnedBucket<K, V> {
         }
     }
 
-    fn into_bucket(self, value: V) -> Owned<Bucket<K, V>> {
+    fn into_bucket(self, value: V) -> OwnedBucket<K, V> {
         match self {
             Self::Key(k) => Owned::new(Bucket::new(k, value)),
             Self::OwnedBucket(mut b) => {
@@ -544,13 +548,13 @@ impl<K, V> KeyOrOwnedBucket<K, V> {
 
 pub(crate) enum InsertOrModifyState<K, V, F: FnOnce() -> V> {
     New(K, F),
-    AttemptedInsertion(Owned<Bucket<K, V>>),
-    AttemptedModification(Owned<Bucket<K, V>>, ValueOrFunction<V, F>),
+    AttemptedInsertion(OwnedBucket<K, V>),
+    AttemptedModification(OwnedBucket<K, V>, ValueOrFunction<V, F>),
 }
 
 impl<K, V, F: FnOnce() -> V> InsertOrModifyState<K, V, F> {
     fn from_bucket_value(
-        bucket: Owned<Bucket<K, V>>,
+        bucket: OwnedBucket<K, V>,
         value_or_function: Option<ValueOrFunction<V, F>>,
     ) -> Self {
         if let Some(value_or_function) = value_or_function {
@@ -568,7 +572,7 @@ impl<K, V, F: FnOnce() -> V> InsertOrModifyState<K, V, F> {
         }
     }
 
-    fn into_insert_bucket(self) -> Owned<Bucket<K, V>> {
+    fn into_insert_bucket(self) -> OwnedBucket<K, V> {
         match self {
             InsertOrModifyState::New(k, f) => Owned::new(Bucket::new(k, f())),
             InsertOrModifyState::AttemptedInsertion(b) => b,
@@ -585,7 +589,7 @@ impl<K, V, F: FnOnce() -> V> InsertOrModifyState<K, V, F> {
         }
     }
 
-    fn into_modify_bucket(self, value: V) -> (Owned<Bucket<K, V>>, ValueOrFunction<V, F>) {
+    fn into_modify_bucket(self, value: V) -> (OwnedBucket<K, V>, ValueOrFunction<V, F>) {
         match self {
             InsertOrModifyState::New(k, f) => (
                 Owned::new(Bucket::new(k, value)),
@@ -655,7 +659,7 @@ impl<T> ProbeLoopResult<T> {
 
 pub(crate) unsafe fn defer_destroy_bucket<'g, K, V>(
     guard: &'g Guard,
-    mut ptr: Shared<'g, Bucket<K, V>>,
+    mut ptr: SharedBucket<'g, K, V>,
 ) {
     assert!(!ptr.is_null());
 
@@ -672,7 +676,7 @@ pub(crate) unsafe fn defer_destroy_bucket<'g, K, V>(
 
 pub(crate) unsafe fn defer_destroy_tombstone<'g, K, V>(
     guard: &'g Guard,
-    mut ptr: Shared<'g, Bucket<K, V>>,
+    mut ptr: SharedBucket<'g, K, V>,
 ) {
     assert!(!ptr.is_null());
     assert_ne!(ptr.tag() & TOMBSTONE_TAG, 0);
@@ -788,7 +792,7 @@ mod tests {
         }
     }
 
-    fn is_ok_null<'g, K, V, E>(maybe_bucket_ptr: Result<Shared<'g, Bucket<K, V>>, E>) -> bool {
+    fn is_ok_null<'g, K, V, E>(maybe_bucket_ptr: Result<SharedBucket<'g, K, V>, E>) -> bool {
         if let Ok(bucket_ptr) = maybe_bucket_ptr {
             bucket_ptr.is_null()
         } else {
