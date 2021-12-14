@@ -819,10 +819,4 @@ impl<K, V, S> Drop for HashMap<K, V, S> {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::write_test_cases_for_me;
-
-    use super::*;
-
-    write_test_cases_for_me!(HashMap);
-}
+mod tests;
